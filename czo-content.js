@@ -105,6 +105,18 @@ function pollForWidgetReady() {
   }
 }
 
+// Helper to wait for a condition to be true
+async function waitFor(conditionFn, timeout = 4000, interval = 100) {
+  const startTime = Date.now();
+  while (Date.now() - startTime < timeout) {
+    if (conditionFn()) {
+      return true;
+    }
+    await new Promise(resolve => setTimeout(resolve, interval));
+  }
+  throw new Error("Timeout waiting for condition");
+}
+
 // Receive file injection command from background script
 browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === "injectFiles") {
@@ -140,8 +152,31 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     // Acknowledge files addition on CZO widget before triggering verification
     logToBackground("Awaiting DOM acknowledgement of uploaded files...");
-    setTimeout(() => {
+
+    const isFileStateReady = () => {
+      // Check if standard input has files
+      if (input.files && input.files.length > 0) return true;
+      // Check if dropzone has standard dropzone preview elements or dz-started class
+      if (dropZone) {
+        if (dropZone.classList.contains("dz-started")) return true;
+        if (dropZone.querySelectorAll(".dz-preview, .file-preview, .uploaded-file, .file-item").length > 0) return true;
+      }
+      return false;
+    };
+
+    const triggerVerification = async () => {
       try {
+        // Wait up to 5 seconds for file state to be ready
+        try {
+          await waitFor(isFileStateReady, 5000, 200);
+          logToBackground("File state is ready on CZO widget.");
+        } catch (waitErr) {
+          logToBackground(`Warning: file state not fully acknowledged in DOM within timeout. Proceeding anyway.`);
+        }
+
+        // Additional safety delay to let Vue/JS bindings update completely
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
         logToBackground("Triggering programmatic click on Verify button...");
         checkBtn.click();
         logToBackground("Verify ('Перевірити') button clicked.");
@@ -152,7 +187,9 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
         logToBackground(`Failed to trigger Verify click: ${clickErr.message}`);
         reportOutcome("error", "", `Failed to click Verify: ${clickErr.message}`);
       }
-    }, 2000);
+    };
+
+    triggerVerification();
   }
 });
 
