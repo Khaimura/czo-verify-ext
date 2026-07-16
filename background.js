@@ -80,7 +80,7 @@ async function scanActiveMessage() {
   logDebug("Starting message scan...");
   try {
     const messageList = await browser.messageDisplay.getDisplayedMessages();
-    const displayedMessages = messageList && messageList.messages ? messageList.messages : [];
+    const displayedMessages = Array.isArray(messageList) ? messageList : (messageList && messageList.messages ? messageList.messages : []);
     if (!displayedMessages || displayedMessages.length === 0) {
       logDebug("No active message displayed in Thunderbird.");
       return { success: false, error: "No active message displayed." };

@@ -29,11 +29,11 @@ function getMimeType(filename) {
   switch (ext) {
     case "pdf": return "application/pdf";
     case "xml": return "text/xml";
-    case "p7s": return "application/pkcs7-signature";
+    case "p7s": return "";
     case "asics":
-    case "asice": return "application/vnd.etsi.asic-e+zip";
+    case "asice": return "";
     case "zip": return "application/zip";
-    default: return "application/octet-stream";
+    default: return "";
   }
 }
 
@@ -221,6 +221,7 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // Periodic polling loop to wait for verification completion
 let resultPollingCount = 0;
 const maxResultPollingCount = 60; // 60 seconds max
+let signInfoFoundTicks = 0;
 
 function pollForVerificationResults() {
   resultPollingCount++;
@@ -257,30 +258,42 @@ function pollForVerificationResults() {
   }
 
   // If a report button or sign information block appears, we are successful
-  if (reportBtn || signInfoBlock) {
+  if (signInfoBlock || reportBtn) {
+    // Try to locate receipt download link
+    let receiptBlobUrl = null;
+    let receiptFilename = "verification-receipt.zip";
+
+    const anchor = document.querySelector("#saveReportFileButton a") || document.querySelector("#saveReportFileButton") || document.querySelector("a[id*='Report']");
+
+    // If we have a valid href, or we have already waited 5 seconds after signInfoBlock appeared, we proceed
+    if (anchor && anchor.href) {
+      receiptBlobUrl = new URL(anchor.href, window.location.href).href;
+      if (anchor.download) {
+        receiptFilename = anchor.download;
+      }
+    } else if (signInfoBlock && signInfoFoundTicks < 5 && resultPollingCount < maxResultPollingCount) {
+      signInfoFoundTicks++;
+      logToBackground(`Verification block found. Waiting for download button/href to populate (tick ${signInfoFoundTicks}/5)...`);
+      setTimeout(pollForVerificationResults, 1000);
+      return;
+    } else if (anchor) {
+      // If we waited 5 seconds but no href was set on the anchor, let's trigger programmatic click fallback
+      try {
+        anchor.click();
+        logToBackground("Programmatic click on receipt fallback button triggered.");
+      } catch (clickErr) {
+        logToBackground(`Fallback click failed: ${clickErr.message}`);
+      }
+    }
+
     logToBackground("Verification result found in DOM.");
-    
+
     // Extract detailed result text
     let resultText = "";
     if (signInfoBlock) {
       resultText = signInfoBlock.innerText ? signInfoBlock.innerText.trim() : "";
     } else {
       resultText = "Qualified Electronic Signature successfully verified by CZO.";
-    }
-
-    // Try to locate receipt download link
-    let receiptBlobUrl = null;
-    let receiptFilename = "verification-receipt.zip";
-
-    // Standard report download button anchors
-    const anchor = document.querySelector("#saveReportFileButton a") || document.querySelector("#saveReportFileButton") || document.querySelector("a[id*='Report']");
-    if (anchor) {
-      if (anchor.href && anchor.href.startsWith("blob:")) {
-        receiptBlobUrl = anchor.href;
-      }
-      if (anchor.download) {
-        receiptFilename = anchor.download;
-      }
     }
 
     reportOutcome("ok", resultText, "", receiptBlobUrl, receiptFilename);
