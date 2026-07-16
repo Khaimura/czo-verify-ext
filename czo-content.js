@@ -136,6 +136,15 @@ function injectFiles(files) {
     const dataTransfer = setFilesOnInput(input, files);
     logToBackground("Standard file input change and input events dispatched.");
 
+    // Define standard drag/drop properties on DataTransfer object to match manual trace exactly
+    try {
+      Object.defineProperty(dataTransfer, 'dropEffect', { value: 'copy', writable: true, configurable: true, enumerable: true });
+      Object.defineProperty(dataTransfer, 'effectAllowed', { value: 'copy', writable: true, configurable: true, enumerable: true });
+      Object.defineProperty(dataTransfer, 'types', { value: ['Files'], writable: true, configurable: true, enumerable: true });
+    } catch (e) {
+      console.warn("Failed to set DataTransfer properties:", e.message);
+    }
+
     // 2. Direct Dropzone addFile Injection
     if (dropZone && dropZone.dropzone) {
       logToBackground("Direct Dropzone instance detected. Calling addFile...");
@@ -145,9 +154,31 @@ function injectFiles(files) {
       return true;
     }
 
-    // 3. Drag & Drop Fallback Simulation
-    if (dropZone && dataTransfer) {
-      logToBackground("Simulating drag & drop events on drop zone...");
+    // 3. Drag & Drop Fallback Simulation matching manual container trace
+    // The CZO page's active uploader container is main > section.form-block > div.container-fluid
+    const container = document.querySelector("main > section.form-block > div.container-fluid") ||
+                      document.querySelector(".container-fluid") ||
+                      document.querySelector("#filesDropZone") ||
+                      document.querySelector(".drop-zone") ||
+                      dropZone;
+
+    if (container && dataTransfer) {
+      logToBackground("Simulating drag & drop sequence on container...");
+
+      // 1. dragenter
+      const dragEnterEvent = new DragEvent("dragenter", {
+        bubbles: true,
+        cancelable: true
+      });
+      Object.defineProperty(dragEnterEvent, "dataTransfer", {
+        value: dataTransfer,
+        writable: false,
+        configurable: true,
+        enumerable: true
+      });
+      container.dispatchEvent(dragEnterEvent);
+
+      // 2. dragover
       const dragOverEvent = new DragEvent("dragover", {
         bubbles: true,
         cancelable: true
@@ -158,8 +189,9 @@ function injectFiles(files) {
         configurable: true,
         enumerable: true
       });
-      dropZone.dispatchEvent(dragOverEvent);
+      container.dispatchEvent(dragOverEvent);
 
+      // 3. drop
       const dropEvent = new DragEvent("drop", {
         bubbles: true,
         cancelable: true
@@ -170,8 +202,8 @@ function injectFiles(files) {
         configurable: true,
         enumerable: true
       });
-      dropZone.dispatchEvent(dropEvent);
-      logToBackground("Dragover and Drop events simulated with defined dataTransfer.");
+      container.dispatchEvent(dropEvent);
+      logToBackground("Dragover and Drop events simulated with defined dataTransfer on container.");
     }
     return true;
   } catch (err) {
@@ -240,7 +272,10 @@ async function handleInjectAndVerify(payload) {
   logToBackground("Awaiting DOM acknowledgement of uploaded files...");
 
   const isFileStateReady = () => {
-    // Check if dropzone has standard dropzone preview elements, dz-started class, or displays the files' names
+    // 1. Check if standard input has files (for standard click injection)
+    if (input && input.files && input.files.length > 0) return true;
+
+    // 2. Check if dropzone has standard dropzone preview elements, dz-started class, or displays the files' names
     if (dropZone) {
       if (dropZone.classList.contains("dz-started")) return true;
       if (dropZone.querySelectorAll(".dz-preview, .file-preview, .uploaded-file, .file-item").length > 0) return true;
@@ -252,16 +287,30 @@ async function handleInjectAndVerify(payload) {
         }
       }
     }
+
+    // 3. Robust page-wide text check: ensure the file names are visible anywhere in the document
+    const bodyText = document.body.innerText || "";
+    let foundAll = true;
+    for (const f of preparedFiles) {
+      if (!bodyText.includes(f.name)) {
+        foundAll = false;
+        break;
+      }
+    }
+    if (foundAll) return true;
+
     return false;
   };
 
   try {
-    // Wait up to 5 seconds for file state to be ready
+    // Wait up to 10 seconds for file state to be ready
     try {
-      await waitFor(isFileStateReady, 5000, 200);
+      await waitFor(isFileStateReady, 10000, 200);
       logToBackground("File state is ready on CZO widget.");
     } catch (waitErr) {
-      logToBackground(`Warning: file state not fully acknowledged in DOM within timeout. Proceeding anyway.`);
+      logToBackground("Error: File state not fully acknowledged in DOM within timeout. Aborting verification.");
+      reportOutcome("error", "", "Failed to upload files: Dropzone did not acknowledge files within 10 seconds.");
+      return;
     }
 
     // Additional safety delay to let Vue/JS bindings update completely
