@@ -23,9 +23,8 @@ function base64ToUint8Array(base64) {
   return bytes;
 }
 
-// Standard file mime-type detector based on extension
-function getMimeType(filename) {
-  const ext = filename.toLowerCase().split('.').pop();
+// Fallback extension-based MIME-type mapper
+function getExtensionMimeType(ext) {
   switch (ext) {
     case "pdf": return "application/pdf";
     case "xml": return "text/xml";
@@ -37,11 +36,57 @@ function getMimeType(filename) {
   }
 }
 
+// Deterministic MIME-type detector based on "magic bytes" (file signatures)
+// with extension-based fallback for unmatched or archive-based formats.
+function getSecureMimeType(filename, bytes) {
+  let mime = "";
+  try {
+    if (bytes && bytes.length >= 2) {
+      // Helper to convert bytes to hex string
+      let hex = "";
+      const len = Math.min(bytes.length, 8);
+      for (let i = 0; i < len; i++) {
+        const h = bytes[i].toString(16).toUpperCase();
+        hex += h.length === 1 ? "0" + h : h;
+      }
+
+      if (hex.startsWith("89504E470D0A1A0A")) {
+        mime = "image/png";
+      } else if (hex.startsWith("FFD8FF")) {
+        mime = "image/jpeg";
+      } else if (hex.startsWith("25504446")) { // %PDF
+        mime = "application/pdf";
+      } else if (hex.startsWith("474946383761") || hex.startsWith("474946383961")) { // GIF87a / GIF89a
+        mime = "image/gif";
+      } else if (hex.startsWith("504B0304")) { // PK.. (ZIP, ASICS, ASICE, etc.)
+        const ext = filename.toLowerCase().split('.').pop();
+        if (ext === "asics" || ext === "asice" || ext === "zip") {
+          mime = "application/zip";
+        } else {
+          mime = getExtensionMimeType(ext);
+        }
+      } else if (hex.startsWith("7F454C46")) {
+        mime = "application/x-elf";
+      } else if (hex.startsWith("4D5A")) {
+        mime = "application/x-msdownload";
+      }
+    }
+  } catch (err) {
+    console.warn("Failed to read magic bytes, falling back to extension lookup:", err.message);
+  }
+
+  if (!mime) {
+    const ext = filename.toLowerCase().split('.').pop();
+    mime = getExtensionMimeType(ext);
+  }
+  return mime;
+}
+
 // Convert message file payloads to File objects
 function buildFileObjects(filesData) {
   return filesData.map(data => {
     const bytes = base64ToUint8Array(data.content);
-    const mime = getMimeType(data.name);
+    const mime = getSecureMimeType(data.name, bytes);
     return new File([bytes], data.name, { type: mime });
   });
 }
