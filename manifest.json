@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "CZO Signature Verifier",
+  "version": "1.0.0",
+  "description": "Automatically verifies electronic signatures of email attachments using the czo.gov.ua portal.",
+  "permissions": [
+    "messagesRead",
+    "messagesModify",
+    "downloads",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://czo.gov.ua/*",
+    "https://id.gov.ua/*"
+  ],
+  "background": {
+    "scripts": ["jszip.min.js", "background.js"]
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "CZO Signature Verifier"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://czo.gov.ua/*",
+        "https://id.gov.ua/*"
+      ],
+      "js": ["czo-content.js"],
+      "all_frames": true,
+      "run_at": "document_end"
+    }
+  ]
+}
