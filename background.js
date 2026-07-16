@@ -37,11 +37,15 @@ async function getOptions() {
 
 // Convert helper for ArrayBuffer/Blob to Base64
 function arrayBufferToBase64(buffer) {
-  let binary = "";
-  let bytes = new Uint8Array(buffer);
-  let len = bytes.byteLength;
-  for (let i = 0; i < len; i++) {
-    binary += String.fromCharCode(bytes[i]);
+  return toBase64(new Uint8Array(buffer));
+}
+
+// Fast Base64 conversion helper matching specification
+function toBase64(uint8) {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < uint8.length; i += chunk) {
+    binary += String.fromCharCode(...uint8.subarray(i, i + chunk));
   }
   return btoa(binary);
 }

@@ -12,7 +12,7 @@ function logToBackground(progress) {
   }
 }
 
-// Helper to convert Base64 back to Blob/Uint8Array
+// Helper to convert Base64 back to Blob/Uint8Array (equivalent to base64ToBytes)
 function base64ToUint8Array(base64) {
   const binaryString = atob(base64);
   const len = binaryString.length;
@@ -21,6 +21,11 @@ function base64ToUint8Array(base64) {
     bytes[i] = binaryString.charCodeAt(i);
   }
   return bytes;
+}
+
+// Alias matching specifications
+function base64ToBytes(base64) {
+  return base64ToUint8Array(base64);
 }
 
 // Fallback extension-based MIME-type mapper
@@ -82,41 +87,66 @@ function getSecureMimeType(filename, bytes) {
   return mime;
 }
 
-// Convert message file payloads to File objects
-function buildFileObjects(filesData) {
-  return filesData.map(data => {
-    const bytes = base64ToUint8Array(data.content);
-    const mime = getSecureMimeType(data.name, bytes);
-    return new File([bytes], data.name, { type: mime });
-  });
+// Base64 conversion helper matching specification
+function toBase64(uint8) {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < uint8.length; i += chunk) {
+    binary += String.fromCharCode(...uint8.subarray(i, i + chunk));
+  }
+  return btoa(binary);
 }
 
-// Inject files using both input.files (DataTransfer) and fallback drag-and-drop
-function injectFiles(inputEl, dropZoneEl, files) {
+// makeFile restoring the original file from its text representation matching specification
+function makeFile(fileInfo) {
+  const b64 = fileInfo.base64 || fileInfo.content;
+  const bytes = base64ToBytes(b64);
+  const mimeType = fileInfo.mime || fileInfo.type || getSecureMimeType(fileInfo.name, bytes);
+  return new File([bytes], fileInfo.name, { type: mimeType });
+}
+
+// setFilesOnInput loading File objects programmatically into file selection field matching specification
+function setFilesOnInput(input, files) {
+  const dt = new DataTransfer();
+  for (const f of files) dt.items.add(f);
+  input.files = dt.files;
+  input.dispatchEvent(new Event('input', {bubbles:true}));
+  input.dispatchEvent(new Event('change', {bubbles:true}));
+  return dt;
+}
+
+// Convert message file payloads to File objects
+function buildFileObjects(filesData) {
+  return filesData.map(makeFile);
+}
+
+// Inject files function matching specification, using fallback direct dropzone / synthetic drag events
+function injectFiles(files) {
   try {
-    logToBackground("Injecting files into DOM input element...");
-    const dataTransfer = new DataTransfer();
-    for (const file of files) {
-      dataTransfer.items.add(file);
+    const input = document.querySelector("#chooseFilesInput") || document.querySelector("input[type=file]");
+    const dropZone = document.querySelector("#filesDropZone") || document.querySelector(".drop-zone") || document.querySelector(".dropzone");
+
+    if (!input) {
+      logToBackground("CZO Input element not found in DOM.");
+      return false;
     }
 
-    // 1. Standard Input Injection
-    inputEl.files = dataTransfer.files;
-    inputEl.dispatchEvent(new Event("change", { bubbles: true }));
-    inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+    logToBackground("Injecting files into DOM input element...");
+    // 1. Standard Input Injection via setFilesOnInput
+    const dataTransfer = setFilesOnInput(input, files);
     logToBackground("Standard file input change and input events dispatched.");
 
     // 2. Direct Dropzone addFile Injection
-    if (dropZoneEl && dropZoneEl.dropzone) {
+    if (dropZone && dropZone.dropzone) {
       logToBackground("Direct Dropzone instance detected. Calling addFile...");
       for (const file of files) {
-        dropZoneEl.dropzone.addFile(file);
+        dropZone.dropzone.addFile(file);
       }
       return true;
     }
 
     // 3. Drag & Drop Fallback Simulation
-    if (dropZoneEl) {
+    if (dropZone && dataTransfer) {
       logToBackground("Simulating drag & drop events on drop zone...");
       const dragOverEvent = new DragEvent("dragover", {
         bubbles: true,
@@ -128,7 +158,7 @@ function injectFiles(inputEl, dropZoneEl, files) {
         configurable: true,
         enumerable: true
       });
-      dropZoneEl.dispatchEvent(dragOverEvent);
+      dropZone.dispatchEvent(dragOverEvent);
 
       const dropEvent = new DragEvent("drop", {
         bubbles: true,
@@ -140,7 +170,7 @@ function injectFiles(inputEl, dropZoneEl, files) {
         configurable: true,
         enumerable: true
       });
-      dropZoneEl.dispatchEvent(dropEvent);
+      dropZone.dispatchEvent(dropEvent);
       logToBackground("Dragover and Drop events simulated with defined dataTransfer.");
     }
     return true;
@@ -182,9 +212,79 @@ async function waitFor(conditionFn, timeout = 4000, interval = 100) {
   throw new Error("Timeout waiting for condition");
 }
 
-// Receive file injection command from background script
+// handleInjectAndVerify matching specifications
+async function handleInjectAndVerify(payload) {
+  contentRequestId = payload.requestId || contentRequestId;
+  logToBackground("Commencing verification sequence.");
+  console.log("[CZO Verifier] Starting verification sequence for payload.");
+
+  const input = document.querySelector("#chooseFilesInput") || document.querySelector("input[type=file]");
+  const dropZone = document.querySelector("#filesDropZone") || document.querySelector(".drop-zone") || document.querySelector(".dropzone");
+  const checkBtn = document.querySelector("#checkButton") || document.querySelector("button.verify-btn") || document.querySelector("button#checkButton");
+
+  if (!input || !checkBtn) {
+    logToBackground("CZO Input or Verify elements disappeared from DOM.");
+    reportOutcome("error", "", "CZO target elements not found in DOM.");
+    return;
+  }
+
+  const preparedFiles = (payload.files || []).map(makeFile);
+  const injected = injectFiles(preparedFiles);
+
+  if (!injected) {
+    reportOutcome("error", "", "Failed to inject files into CZO input.");
+    return;
+  }
+
+  // Acknowledge files addition on CZO widget before triggering verification
+  logToBackground("Awaiting DOM acknowledgement of uploaded files...");
+
+  const isFileStateReady = () => {
+    // Check if dropzone has standard dropzone preview elements, dz-started class, or displays the files' names
+    if (dropZone) {
+      if (dropZone.classList.contains("dz-started")) return true;
+      if (dropZone.querySelectorAll(".dz-preview, .file-preview, .uploaded-file, .file-item").length > 0) return true;
+
+      const dropZoneText = dropZone.innerText || "";
+      for (const f of preparedFiles) {
+        if (dropZoneText.includes(f.name)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  try {
+    // Wait up to 5 seconds for file state to be ready
+    try {
+      await waitFor(isFileStateReady, 5000, 200);
+      logToBackground("File state is ready on CZO widget.");
+    } catch (waitErr) {
+      logToBackground(`Warning: file state not fully acknowledged in DOM within timeout. Proceeding anyway.`);
+    }
+
+    // Additional safety delay to let Vue/JS bindings update completely
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    logToBackground("Triggering programmatic click on Verify button...");
+    checkBtn.click();
+    logToBackground("Verify ('Перевірити') button clicked.");
+
+    // Start polling for the output results
+    pollForVerificationResults();
+  } catch (clickErr) {
+    logToBackground(`Failed to trigger Verify click: ${clickErr.message}`);
+    reportOutcome("error", "", `Failed to click Verify: ${clickErr.message}`);
+  }
+}
+
+// Receive file injection command from background script supporting both formats
 browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.action === "injectFiles") {
+  if (message.type === "czo-inject-and-verify") {
+    handleInjectAndVerify(message.payload);
+  }
+  else if (message.action === "injectFiles") {
     // Idempotency check: Ensure the same requestId is never run twice
     if (contentRequestId === message.requestId && injectionTriggered) {
       console.log("[CZO Verifier] Idempotency Guard triggered. Duplicated injectFiles request ignored.");
@@ -194,72 +294,11 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     contentRequestId = message.requestId;
     injectionTriggered = true;
 
-    logToBackground("Received files from background script. Commencing verification sequence.");
-    console.log("[CZO Verifier] Starting verification sequence for " + message.requestId);
-
-    const input = document.querySelector("#chooseFilesInput") || document.querySelector("input[type=file]");
-    const dropZone = document.querySelector("#filesDropZone") || document.querySelector(".drop-zone") || document.querySelector(".dropzone");
-    const checkBtn = document.querySelector("#checkButton") || document.querySelector("button.verify-btn") || document.querySelector("button#checkButton");
-
-    if (!input || !checkBtn) {
-      logToBackground("CZO Input or Verify elements disappeared from DOM.");
-      reportOutcome("error", "", "CZO target elements not found in DOM.");
-      return;
-    }
-
-    const files = buildFileObjects(message.files);
-    const injected = injectFiles(input, dropZone, files);
-
-    if (!injected) {
-      reportOutcome("error", "", "Failed to inject files into CZO input.");
-      return;
-    }
-
-    // Acknowledge files addition on CZO widget before triggering verification
-    logToBackground("Awaiting DOM acknowledgement of uploaded files...");
-
-    const isFileStateReady = () => {
-      // Check if dropzone has standard dropzone preview elements, dz-started class, or displays the files' names
-      if (dropZone) {
-        if (dropZone.classList.contains("dz-started")) return true;
-        if (dropZone.querySelectorAll(".dz-preview, .file-preview, .uploaded-file, .file-item").length > 0) return true;
-
-        const dropZoneText = dropZone.innerText || "";
-        for (const f of files) {
-          if (dropZoneText.includes(f.name)) {
-            return true;
-          }
-        }
-      }
-      return false;
-    };
-
-    const triggerVerification = async () => {
-      try {
-        // Wait up to 5 seconds for file state to be ready
-        try {
-          await waitFor(isFileStateReady, 5000, 200);
-          logToBackground("File state is ready on CZO widget.");
-        } catch (waitErr) {
-          logToBackground(`Warning: file state not fully acknowledged in DOM within timeout. Proceeding anyway.`);
-        }
-
-        // Additional safety delay to let Vue/JS bindings update completely
-        await new Promise(resolve => setTimeout(resolve, 1000));
-
-        logToBackground("Triggering programmatic click on Verify button...");
-        checkBtn.click();
-        logToBackground("Verify ('Перевірити') button clicked.");
-        
-        // Start polling for the output results
-        pollForVerificationResults();
-      } catch (clickErr) {
-        logToBackground(`Failed to trigger Verify click: ${clickErr.message}`);
-        reportOutcome("error", "", `Failed to click Verify: ${clickErr.message}`);
-      }
-    };
-
-    triggerVerification();
+    logToBackground("Received files from background script.");
+    handleInjectAndVerify({
+      requestId: message.requestId,
+      files: message.files
+    });
   }
 });
 
