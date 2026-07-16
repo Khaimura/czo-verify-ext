@@ -29,9 +29,9 @@ function getMimeType(filename) {
   switch (ext) {
     case "pdf": return "application/pdf";
     case "xml": return "text/xml";
-    case "p7s": return "";
+    case "p7s": return "application/pkcs7-signature";
     case "asics":
-    case "asice": return "";
+    case "asice": return "application/zip";
     case "zip": return "application/zip";
     default: return "";
   }
@@ -115,8 +115,8 @@ function pollForWidgetReady() {
   const dropZone = document.querySelector("#filesDropZone") || document.querySelector(".drop-zone") || document.querySelector(".dropzone");
   const checkBtn = document.querySelector("#checkButton") || document.querySelector("button.verify-btn") || document.querySelector("button#checkButton");
 
-  // We are inside the target frame if elements are found
-  if (input && checkBtn) {
+  // We are inside the target frame if all critical elements (including dropZone) are found
+  if (input && dropZone && checkBtn) {
     readyChecked = true;
     console.log("[CZO Verifier] Widget loaded in DOM.");
     browser.runtime.sendMessage({ action: "widgetReady" }).catch(() => {});
