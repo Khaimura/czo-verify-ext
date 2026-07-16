@@ -97,7 +97,7 @@ async function scanActiveMessage() {
     for (const attach of attachments) {
       logDebug(`Processing attachment: "${attach.name}" (${attach.size} bytes)`);
       try {
-        const fileObj = await browser.messages.getAttachmentFile(msg.id, attach.part);
+        const fileObj = await browser.messages.getAttachmentFile(msg.id, attach.partName);
         const arrayBuffer = await fileObj.arrayBuffer();
 
         const ext = attach.name.toLowerCase().split('.').pop();
