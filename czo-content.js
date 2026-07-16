@@ -58,25 +58,45 @@ function injectFiles(inputEl, dropZoneEl, files) {
     // 1. Standard Input Injection
     inputEl.files = dataTransfer.files;
     inputEl.dispatchEvent(new Event("change", { bubbles: true }));
-    logToBackground("Standard file input change event dispatched.");
+    inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+    logToBackground("Standard file input change and input events dispatched.");
 
-    // 2. Drag & Drop Fallback Simulation
+    // 2. Direct Dropzone addFile Injection
+    if (dropZoneEl && dropZoneEl.dropzone) {
+      logToBackground("Direct Dropzone instance detected. Calling addFile...");
+      for (const file of files) {
+        dropZoneEl.dropzone.addFile(file);
+      }
+      return true;
+    }
+
+    // 3. Drag & Drop Fallback Simulation
     if (dropZoneEl) {
       logToBackground("Simulating drag & drop events on drop zone...");
       const dragOverEvent = new DragEvent("dragover", {
         bubbles: true,
-        cancelable: true,
-        dataTransfer
+        cancelable: true
+      });
+      Object.defineProperty(dragOverEvent, "dataTransfer", {
+        value: dataTransfer,
+        writable: false,
+        configurable: true,
+        enumerable: true
       });
       dropZoneEl.dispatchEvent(dragOverEvent);
 
       const dropEvent = new DragEvent("drop", {
         bubbles: true,
-        cancelable: true,
-        dataTransfer
+        cancelable: true
+      });
+      Object.defineProperty(dropEvent, "dataTransfer", {
+        value: dataTransfer,
+        writable: false,
+        configurable: true,
+        enumerable: true
       });
       dropZoneEl.dispatchEvent(dropEvent);
-      logToBackground("Dragover and Drop events simulated.");
+      logToBackground("Dragover and Drop events simulated with defined dataTransfer.");
     }
     return true;
   } catch (err) {
@@ -103,6 +123,18 @@ function pollForWidgetReady() {
   } else {
     setTimeout(pollForWidgetReady, 1000);
   }
+}
+
+// Helper to wait for a condition to be true
+async function waitFor(conditionFn, timeout = 4000, interval = 100) {
+  const startTime = Date.now();
+  while (Date.now() - startTime < timeout) {
+    if (conditionFn()) {
+      return true;
+    }
+    await new Promise(resolve => setTimeout(resolve, interval));
+  }
+  throw new Error("Timeout waiting for condition");
 }
 
 // Receive file injection command from background script
@@ -140,8 +172,36 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     // Acknowledge files addition on CZO widget before triggering verification
     logToBackground("Awaiting DOM acknowledgement of uploaded files...");
-    setTimeout(() => {
+
+    const isFileStateReady = () => {
+      // Check if dropzone has standard dropzone preview elements, dz-started class, or displays the files' names
+      if (dropZone) {
+        if (dropZone.classList.contains("dz-started")) return true;
+        if (dropZone.querySelectorAll(".dz-preview, .file-preview, .uploaded-file, .file-item").length > 0) return true;
+        
+        const dropZoneText = dropZone.innerText || "";
+        for (const f of files) {
+          if (dropZoneText.includes(f.name)) {
+            return true;
+          }
+        }
+      }
+      return false;
+    };
+
+    const triggerVerification = async () => {
       try {
+        // Wait up to 5 seconds for file state to be ready
+        try {
+          await waitFor(isFileStateReady, 5000, 200);
+          logToBackground("File state is ready on CZO widget.");
+        } catch (waitErr) {
+          logToBackground(`Warning: file state not fully acknowledged in DOM within timeout. Proceeding anyway.`);
+        }
+
+        // Additional safety delay to let Vue/JS bindings update completely
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
         logToBackground("Triggering programmatic click on Verify button...");
         checkBtn.click();
         logToBackground("Verify ('Перевірити') button clicked.");
@@ -152,7 +212,9 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
         logToBackground(`Failed to trigger Verify click: ${clickErr.message}`);
         reportOutcome("error", "", `Failed to click Verify: ${clickErr.message}`);
       }
-    }, 2000);
+    };
+
+    triggerVerification();
   }
 });
 
