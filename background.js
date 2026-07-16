@@ -199,7 +199,7 @@ async function scanActiveMessage() {
       if (bestMatch) {
         logDebug(`Successfully matched signature "${sig.name}" with data file "${bestMatch.name}"`);
         candidates.push({
-          id: `detached_${sig.name}_${bestMatch.name}_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+          id: `detached_${sig.name}_${bestMatch.name}`,
           scenario: "detached-p7s",
           label: `${sig.name} + ${bestMatch.name}`,
           files: [sig, bestMatch]
@@ -214,7 +214,7 @@ async function scanActiveMessage() {
       if (matchedSigNames.has(sig.name)) continue;
       logDebug(`Signature "${sig.name}" is unmatched. Creating single-p7s scenario.`);
       candidates.push({
-        id: `single_p7s_${sig.name}_${Date.now()}`,
+        id: `single_p7s_${sig.name}`,
         scenario: "single-p7s",
         label: `${sig.name} (Signature only)`,
         files: [sig]
@@ -231,7 +231,7 @@ async function scanActiveMessage() {
       if (["pdf", "xml", "asics", "asice", "zip"].includes(ext)) {
         logDebug(`Standalone file "${data.name}" is unmatched. Creating single scenario.`);
         candidates.push({
-          id: `single_${data.name}_${Date.now()}`,
+          id: `single_${data.name}`,
           scenario: "single",
           label: `${data.name}`,
           files: [data]
