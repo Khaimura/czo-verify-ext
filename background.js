@@ -3,6 +3,91 @@ if (typeof importScripts !== "undefined") {
   importScripts("jszip.min.js");
 }
 
+// Browser-compatible mime object matching specifications
+const mime = {
+  lookup: function(filename) {
+    const ext = filename.toLowerCase().split('.').pop();
+    switch (ext) {
+      case "pdf": return "application/pdf";
+      case "xml": return "text/xml";
+      case "p7s": return "application/pkcs7-signature";
+      case "asics":
+      case "asice": return "application/zip";
+      case "zip": return "application/zip";
+      case "docx": return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+      case "xlsx": return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+      case "pptx": return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+      case "webp": return "image/webp";
+      case "png": return "image/png";
+      case "jpg":
+      case "jpeg": return "image/jpeg";
+      case "gif": return "image/gif";
+      case "txt": return "text/plain";
+      default: return null;
+    }
+  }
+};
+
+/**
+ * Safely resolves the MIME type of an attachment buffer using a hybrid approach:
+ * 1. Inspects the first 8 bytes (Magic Bytes) to block malicious file masquerading.
+ * 2. Falls back to the 'mime-types' library for standard extension-based resolution.
+ *
+ * @param {ArrayBuffer} arrayBuffer - The raw binary data of the file.
+ * @param {string} filename - The declared filename.
+ * @returns {string} - Resolved secure MIME-type or "application/octet-stream".
+ */
+function getSecureMimeType(arrayBuffer, filename) {
+  // Extract the first 8 bytes for signature analysis
+  const uint8 = new Uint8Array(arrayBuffer.slice(0, 8));
+  let hex = "";
+  for (let i = 0; i < uint8.length; i++) {
+    hex += uint8[i].toString(16).padStart(2, '0').toUpperCase();
+  }
+
+  const ext = filename.toLowerCase().split('.').pop();
+
+  // --- STEP 1: CRITICAL SECURITY SIGNATURE GUARD ---
+
+  // Intercept executable spoofing (e.g. virus.exe renamed to document.p7s)
+  if (hex.startsWith("4D5A")) {
+    logDebug(`SECURITY ALERT: File "${filename}" detected as Windows Executable (MZ). Aborting processing!`);
+    return "application/x-msdownload";
+  }
+  if (hex.startsWith("7F454C46")) {
+    logDebug(`SECURITY ALERT: File "${filename}" detected as Linux Executable (ELF). Aborting processing!`);
+    return "application/x-elf";
+  }
+
+  // Explicitly validate known structural types
+  if (hex.startsWith("25504446")) {
+    return "application/pdf";
+  }
+  if (hex.startsWith("3C3F786D6C")) { // "<?xml"
+    return "text/xml";
+  }
+  if (hex.startsWith("3082") || hex.startsWith("3080")) { // DER ASN.1 structure
+    return "application/pkcs7-signature";
+  }
+  if (hex.startsWith("504B0304")) { // ZIP / ASiC container signature
+    // For ZIP structures, we use 'mime-types' to determine if it is .asics, .asice, or a generic .zip
+    try {
+      const lookedUpMime = mime.lookup(filename);
+      if (lookedUpMime && lookedUpMime.includes("zip")) {
+        return lookedUpMime;
+      }
+    } catch (e) {}
+    return "application/zip";
+  }
+
+  // --- STEP 2: MULTI-PURPOSE MIME-TYPES FALLBACK ---
+  try {
+    return mime.lookup(filename) || "application/octet-stream";
+  } catch (e) {
+    return "application/octet-stream";
+  }
+}
+
 // Detailed logs array for debugging without DevTools
 let diagnosticsLogs = [];
 
@@ -104,7 +189,18 @@ async function scanActiveMessage() {
         const fileObj = await browser.messages.getAttachmentFile(msg.id, attach.partName);
         const arrayBuffer = await fileObj.arrayBuffer();
 
+        // --- HYBRID VALIDATION LAYER ---
+        const detectedMime = getSecureMimeType(arrayBuffer, attach.name);
         const ext = attach.name.toLowerCase().split('.').pop();
+
+        logDebug(`Processing "${attach.name}": Declared Extension: .${ext} | Resolved MIME: ${detectedMime}`);
+
+        // Block processing of any executables detected via Magic Bytes
+        if (detectedMime === "application/x-msdownload" || detectedMime === "application/x-elf") {
+          logDebug(`Processing blocked for "${attach.name}" due to critical security threat (MIME mismatch).`);
+          continue; // Skip compilation of this file
+        }
+
         if (ext === "zip") {
           logDebug(`Extracting ZIP attachment: "${attach.name}"`);
           try {
@@ -116,9 +212,18 @@ async function scanActiveMessage() {
 
               logDebug(`Extracted root file from ZIP: "${relativePath}"`);
               const contentBuffer = await zipEntry.async("arraybuffer");
+
+              // Validate zip entries as well
+              const entryMime = getSecureMimeType(contentBuffer, relativePath);
+              if (entryMime === "application/x-msdownload" || entryMime === "application/x-elf") {
+                logDebug(`SECURITY ALERT: Extracted file "${relativePath}" inside ZIP detected as Executable. Skipping file.`);
+                continue;
+              }
+
               filePool.push({
                 name: relativePath,
                 content: arrayBufferToBase64(contentBuffer),
+                mime: entryMime,
                 source: `zip:${attach.name}`
               });
             }
@@ -129,11 +234,12 @@ async function scanActiveMessage() {
           filePool.push({
             name: attach.name,
             content: arrayBufferToBase64(arrayBuffer),
+            mime: detectedMime,
             source: "attachment"
           });
         }
       } catch (attachErr) {
-        logDebug(`Error retrieving attachment "${attach.name}": ${attachErr.message}`);
+        logDebug(`Error processing attachment "${attach.name}": ${attachErr.message}`);
       }
     }
 
