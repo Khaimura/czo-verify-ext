@@ -392,53 +392,33 @@ function pollForVerificationResults() {
 
   // If a report button or sign information block appears, we are successful
   if (signInfoBlock || reportBtn) {
-    // Try to locate receipt download link
-    let receiptBlobUrl = null;
-    let receiptFilename = "verification-receipt.zip";
+    logToBackground("Verification result found in DOM. Mimicking manual download behavior.");
 
-    // Prioritize zip/receipt download anchors over PDF reports
-    let anchor = null;
-    const zipAnchors = Array.from(document.querySelectorAll("a")).filter(a => {
-      return (a.download && a.download.toLowerCase().endsWith(".zip")) || 
-             (a.href && a.href.toLowerCase().includes(".zip")) ||
-             (a.id && (a.id.toLowerCase().includes("zip") || a.id.toLowerCase().includes("receipt")));
-    });
+    // Пріоритетно шукаємо кнопку квитанції (Receipt), а потім протоколу (Report)
+    const receiptBtn = document.querySelector("#saveReceiptFileButton") ||
+                       document.querySelector("button[id*='Receipt']") ||
+                       document.querySelector("a[id*='Receipt']") ||
+                       document.querySelector(".download-receipt") ||
+                       document.querySelector("#saveReportFileButton") ||
+                       document.querySelector("button[id*='Report']") ||
+                       document.querySelector("a[id*='Report']");
 
-    if (zipAnchors.length > 0) {
-      anchor = zipAnchors[0];
-    } else {
-      anchor = document.querySelector("#saveReceiptFileButton a") || 
-               document.querySelector("#saveReceiptFileButton") || 
-               document.querySelector("a[id*='Receipt']") || 
-               document.querySelector("button[id*='Receipt']") ||
-               document.querySelector("#saveReportFileButton a") || 
-               document.querySelector("#saveReportFileButton") || 
-               document.querySelector("a[id*='Report']");
-    }
-    
-    // If we have a valid href, or we have already waited 5 seconds after signInfoBlock appeared, we proceed
-    if (anchor && anchor.href) {
-      receiptBlobUrl = new URL(anchor.href, window.location.href).href;
-      if (anchor.download) {
-        receiptFilename = anchor.download;
+    if (receiptBtn) {
+      try {
+        // Повторюємо ручную поведінку: просто клікаємо на кнопку
+        receiptBtn.click();
+        logToBackground("Clicked the receipt/report download button naturally.");
+      } catch (clickErr) {
+        logToBackground(`Manual click simulation failed: ${clickErr.message}`);
       }
     } else if (signInfoBlock && signInfoFoundTicks < 5 && resultPollingCount < maxResultPollingCount) {
+      // Чекаємо, поки DOM відмалює кнопку після появи блоку результатів
       signInfoFoundTicks++;
-      logToBackground(`Verification block found. Waiting for download button/href to populate (tick ${signInfoFoundTicks}/5)...`);
+      logToBackground(`Verification block found. Waiting for download button to render (tick ${signInfoFoundTicks}/5)...`);
       setTimeout(pollForVerificationResults, 1000);
       return;
-    } else if (anchor) {
-      // If we waited 5 seconds but no href was set on the anchor, let's trigger programmatic click fallback
-      try {
-        anchor.click();
-        logToBackground("Programmatic click on receipt fallback button triggered.");
-      } catch (clickErr) {
-        logToBackground(`Fallback click failed: ${clickErr.message}`);
-      }
     }
 
-    logToBackground("Verification result found in DOM.");
-    
     // Extract detailed result text
     let resultText = "";
     if (signInfoBlock) {
@@ -447,7 +427,8 @@ function pollForVerificationResults() {
       resultText = "Qualified Electronic Signature successfully verified by CZO.";
     }
 
-    reportOutcome("ok", resultText, "", receiptBlobUrl, receiptFilename);
+    // Повертаємо результат. receiptBlobUrl передаємо як null, оскільки CZO сам ініціює завантаження
+    reportOutcome("ok", resultText, "", null, "");
     return;
   }
 
