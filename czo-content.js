@@ -380,10 +380,10 @@ function pollForVerificationResults() {
   const widgetText = document.body.innerText || "";
   const lowercaseText = widgetText.toLowerCase();
   
-  const hasErrorKeyword = ["невірний", "помилка", "не підтримується", "помилка зчитування", "error", "invalid"].some(kw => lowercaseText.includes(kw));
+  const hasErrorKeyword = ["невірний", "помилка", "не підтримується", "помилка зчитування", "не містить", "не знайдено", "відсутні", "відсутній", "немає", "error", "invalid"].some(kw => lowercaseText.includes(kw));
 
   // If we find an unambiguous error container or keyword but no reportBtn yet, we check if it is a failure
-  if (hasErrorKeyword && (errorText || lowercaseText.includes("помилка"))) {
+  if (hasErrorKeyword && (errorText || lowercaseText.includes("помилка") || lowercaseText.includes("не знайдено") || lowercaseText.includes("не містить"))) {
     logToBackground("Error indicator detected in DOM text.");
     const fullErrorMsg = errorText || "CZO reported an error during validation.";
     reportOutcome("error", "", fullErrorMsg);
@@ -396,7 +396,25 @@ function pollForVerificationResults() {
     let receiptBlobUrl = null;
     let receiptFilename = "verification-receipt.zip";
 
-    const anchor = document.querySelector("#saveReportFileButton a") || document.querySelector("#saveReportFileButton") || document.querySelector("a[id*='Report']");
+    // Prioritize zip/receipt download anchors over PDF reports
+    let anchor = null;
+    const zipAnchors = Array.from(document.querySelectorAll("a")).filter(a => {
+      return (a.download && a.download.toLowerCase().endsWith(".zip")) || 
+             (a.href && a.href.toLowerCase().includes(".zip")) ||
+             (a.id && (a.id.toLowerCase().includes("zip") || a.id.toLowerCase().includes("receipt")));
+    });
+
+    if (zipAnchors.length > 0) {
+      anchor = zipAnchors[0];
+    } else {
+      anchor = document.querySelector("#saveReceiptFileButton a") || 
+               document.querySelector("#saveReceiptFileButton") || 
+               document.querySelector("a[id*='Receipt']") || 
+               document.querySelector("button[id*='Receipt']") ||
+               document.querySelector("#saveReportFileButton a") || 
+               document.querySelector("#saveReportFileButton") || 
+               document.querySelector("a[id*='Report']");
+    }
     
     // If we have a valid href, or we have already waited 5 seconds after signInfoBlock appeared, we proceed
     if (anchor && anchor.href) {
