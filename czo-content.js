@@ -405,7 +405,7 @@ function pollForVerificationResults() {
 
     if (receiptBtn) {
       try {
-        // Повторюємо ручную поведінку: просто клікаємо на кнопку
+        // Повторюємо ручну поведінку: просто клікаємо на кнопку
         receiptBtn.click();
         logToBackground("Clicked the receipt/report download button naturally.");
       } catch (clickErr) {
