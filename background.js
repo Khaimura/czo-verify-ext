@@ -552,7 +552,7 @@ async function handleSilentDownload(requestId, downloadButtonId) {
     startedAt: taskInfo.pendingDownload.startedAt
   });
 
-  taskInfo.progress = 'Triggering page click on "Завантажити все архівом"';
+  taskInfo.progress = 'Triggering page click on "Р—Р°РІР°РЅС‚Р°Р¶РёС‚Рё РІСЃРµ Р°СЂС…С–РІРѕРј"';
   logDebug(`[${taskInfo.candidate.label}] Requesting content script to click archive download button. Subfolder="${folder}" ButtonId="${downloadButtonId || ""}"`);
 
   try {
@@ -843,7 +843,7 @@ browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
         clearTimeout(task.timeoutId);
       }
 
-      // Preferred flow: ask content script to click "Завантажити все архівом"
+      // Preferred flow: ask content script to click "Р—Р°РІР°РЅС‚Р°Р¶РёС‚Рё РІСЃРµ Р°СЂС…С–РІРѕРј"
       if (autoDownloadArchive) {
         handleSilentDownload(requestId, downloadButtonId).catch(err => {
           logDebug(`[${task.candidate.label}] handleSilentDownload failed: ${err.message}`);
