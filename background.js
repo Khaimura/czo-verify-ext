@@ -176,23 +176,19 @@ async function scanActiveMessage() {
     }
 
     const msg = displayedMessages[0];
-    logDebug(`Found displayed message: ID ${msg.id}, Subject: "${msg.subject}"`);
+    logDebug(`Processing message: "${msg.subject}"`);
 
     const attachments = await browser.messages.listAttachments(msg.id);
-    logDebug(`Found ${attachments.length} attachments on the message.`);
 
     let filePool = [];
 
     for (const attach of attachments) {
-      logDebug(`Processing attachment: "${attach.name}" (${attach.size} bytes)`);
       try {
         const fileObj = await browser.messages.getAttachmentFile(msg.id, attach.partName);
         const arrayBuffer = await fileObj.arrayBuffer();
 
         const detectedMime = getSecureMimeType(arrayBuffer, attach.name);
         const ext = attach.name.toLowerCase().split(".").pop();
-
-        logDebug(`Processing "${attach.name}": Declared Extension: .${ext} | Resolved MIME: ${detectedMime}`);
 
         if (detectedMime === "application/x-msdownload" || detectedMime === "application/x-elf") {
           logDebug(`Processing blocked for "${attach.name}" due to critical security threat (MIME mismatch).`);
@@ -207,7 +203,6 @@ async function scanActiveMessage() {
               if (zipEntry.dir) continue;
               if (relativePath.includes("/")) continue;
 
-              logDebug(`Extracted root file from ZIP: "${relativePath}"`);
               const contentBuffer = await zipEntry.async("arraybuffer");
 
               const entryMime = getSecureMimeType(contentBuffer, relativePath);
@@ -224,7 +219,7 @@ async function scanActiveMessage() {
               });
             }
           } catch (zipErr) {
-            logDebug(`Error loading/unpacking zip "${attach.name}": ${zipErr.message}`);
+            logDebug(`Error loading zip "${attach.name}": ${zipErr.message}`);
           }
         } else {
           filePool.push({
@@ -239,8 +234,6 @@ async function scanActiveMessage() {
       }
     }
 
-    logDebug(`Total files collected in pool for matching: ${filePool.length}`);
-
     const supportedExtensions = ["p7s", "pdf", "xml", "asics", "asice", "zip"];
     const candidates = [];
 
@@ -249,8 +242,6 @@ async function scanActiveMessage() {
       const ext = parts[parts.length - 1];
       return supportedExtensions.includes(ext);
     });
-
-    logDebug(`Pool filtered to supported types: ${pool.length} files`);
 
     let sigFiles = pool.filter(f => f.name.toLowerCase().endsWith(".p7s"));
     let dataFiles = pool.filter(f => !f.name.toLowerCase().endsWith(".p7s"));
@@ -263,8 +254,6 @@ async function scanActiveMessage() {
       let bestMatch = null;
       let minDistance = 999;
 
-      logDebug(`Attempting to match detached signature: "${sig.name}" (stem: "${sigStem}")`);
-
       for (const data of dataFiles) {
         if (matchedDataNames.has(data.name)) continue;
 
@@ -273,15 +262,12 @@ async function scanActiveMessage() {
 
         if (sigStem === dataStem) {
           isMatch = true;
-          logDebug(`Exact stem match: "${sig.name}" <-> "${data.name}"`);
         } else if (sigStem.includes(dataStem) || dataStem.includes(sigStem)) {
           isMatch = true;
-          logDebug(`Fuzzy stem contains: "${sig.name}" <-> "${data.name}"`);
         } else {
           const dist = levenshteinDistance(sigStem, dataStem);
           if (dist <= 3) {
             isMatch = true;
-            logDebug(`Fuzzy Levenshtein match (dist ${dist}): "${sig.name}" <-> "${data.name}"`);
           }
         }
 
@@ -295,7 +281,7 @@ async function scanActiveMessage() {
       }
 
       if (bestMatch) {
-        logDebug(`Successfully matched signature "${sig.name}" with data file "${bestMatch.name}"`);
+        logDebug(`Matched detached signature: "${sig.name}" + "${bestMatch.name}"`);
         candidates.push({
           id: `detached_${sig.name}_${bestMatch.name}`,
           scenario: "detached-p7s",
@@ -309,7 +295,7 @@ async function scanActiveMessage() {
 
     for (const sig of sigFiles) {
       if (matchedSigNames.has(sig.name)) continue;
-      logDebug(`Signature "${sig.name}" is unmatched. Creating single-p7s scenario.`);
+      logDebug(`Signature only (unmatched): "${sig.name}"`);
       candidates.push({
         id: `single_p7s_${sig.name}`,
         scenario: "single-p7s",
@@ -323,7 +309,7 @@ async function scanActiveMessage() {
 
       const ext = data.name.toLowerCase().split(".").pop();
       if (["pdf", "xml", "asics", "asice", "zip"].includes(ext)) {
-        logDebug(`Standalone file "${data.name}" is unmatched. Creating single scenario.`);
+        logDebug(`Standalone file: "${data.name}"`);
         candidates.push({
           id: `single_${data.name}`,
           scenario: "single",
@@ -333,7 +319,7 @@ async function scanActiveMessage() {
       }
     }
 
-    logDebug(`Completed pairing. Total candidates: ${candidates.length}`);
+    logDebug(`Scanning complete. Identified ${candidates.length} candidates.`);
     return { success: true, messageId: msg.id, candidates };
   } catch (err) {
     logDebug(`Error scanning message: ${err.message}\n${err.stack}`);
@@ -733,8 +719,6 @@ async function runAllVerifications(candidateIds, messageId) {
 
 // Receive messages from content script, popup, and options
 browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  logDebug(`Message received: action = ${request.action}`);
-
   if (request.action === "getLogs") {
     sendResponse({ logs: diagnosticsLogs });
     return true;
@@ -771,7 +755,6 @@ browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
   // --- Content Script Interaction ---
   if (request.action === "widgetReady") {
     const senderTabId = sender.tab ? sender.tab.id : null;
-    logDebug(`Content script reported ready in tab ID ${senderTabId}. Frame URL: ${sender.url}`);
 
     if (senderTabId) {
       const matchedReqId = Object.keys(verificationTasks).find(
@@ -780,7 +763,7 @@ browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
       if (matchedReqId) {
         const task = verificationTasks[matchedReqId];
-        logDebug(`Found matching pending task ${matchedReqId} for tab ${senderTabId}. Injecting files!`);
+        logDebug(`[${task.candidate.label}] Preparing CZO portal for file injection.`);
 
         browser.tabs.sendMessage(senderTabId, {
           action: "injectFiles",
@@ -788,10 +771,8 @@ browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
           scenario: task.candidate.scenario,
           files: task.candidate.files
         }, { frameId: sender.frameId }).catch(err => {
-          logDebug(`Error sending injectFiles to tab ${senderTabId}: ${err.message}`);
+          logDebug(`[${task.candidate.label}] Error during file injection: ${err.message}`);
         });
-      } else {
-        logDebug(`No matching pending task found for tab ID ${senderTabId}.`);
       }
     }
 
@@ -803,7 +784,11 @@ browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const { requestId, progress } = request;
     if (verificationTasks[requestId]) {
       verificationTasks[requestId].progress = progress;
-      logDebug(`[${verificationTasks[requestId].candidate.label}] Progress: ${progress}`);
+      // Filter out low-level polling logs from the diagnostic logs,
+      // but still send updates to updatePopupProgress for the UI panel.
+      if (!progress.includes("Polling for CZO results")) {
+        logDebug(`[${verificationTasks[requestId].candidate.label}] ${progress}`);
+      }
       updatePopupProgress();
     }
     sendResponse({ success: true });

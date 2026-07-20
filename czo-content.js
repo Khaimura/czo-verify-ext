@@ -137,9 +137,8 @@ function injectFiles(files) {
       return false;
     }
 
-    logToBackground("Injecting files into DOM input element...");
+    logToBackground("Injecting files...");
     const dataTransfer = setFilesOnInput(input, files);
-    logToBackground("Standard file input change and input events dispatched.");
 
     try {
       Object.defineProperty(dataTransfer, "dropEffect", {
@@ -165,7 +164,6 @@ function injectFiles(files) {
     }
 
     if (dropZone && dropZone.dropzone) {
-      logToBackground("Direct Dropzone instance detected. Calling addFile...");
       for (const file of files) {
         dropZone.dropzone.addFile(file);
       }
@@ -180,8 +178,6 @@ function injectFiles(files) {
       dropZone;
 
     if (container && dataTransfer) {
-      logToBackground("Simulating drag & drop sequence on container...");
-
       const dragEnterEvent = new DragEvent("dragenter", {
         bubbles: true,
         cancelable: true
@@ -217,8 +213,6 @@ function injectFiles(files) {
         enumerable: true
       });
       container.dispatchEvent(dropEvent);
-
-      logToBackground("Dragover and Drop events simulated with defined dataTransfer on container.");
     }
 
     return true;
@@ -421,23 +415,14 @@ function findArchiveDownloadButton(downloadButtonId = null) {
     if (byId) {
       const label = byId.querySelector("label.i18n");
       const labelText = getElementText(label || byId);
-      const info = getElementDebugInfo(byId, 0);
-
-      logToBackground(`[findArchiveDownloadButton] Explicit id candidate: ${formatElementDebugInfo(info)}`);
-      logToBackground(`[findArchiveDownloadButton] Explicit id candidate label text: "${labelText}"`);
 
       if (
         byId.id === "saveAllButton" &&
         label &&
         labelText.trim() === "Завантажити все архівом"
       ) {
-        logToBackground(`[findArchiveDownloadButton] Explicit id matched exact saveAllButton.`);
         return byId;
       }
-
-      logToBackground(`[findArchiveDownloadButton] Explicit id exists but is not the required saveAllButton.`);
-    } else {
-      logToBackground(`[findArchiveDownloadButton] Explicit button id "${downloadButtonId}" not found in DOM.`);
     }
   }
 
@@ -445,30 +430,12 @@ function findArchiveDownloadButton(downloadButtonId = null) {
   if (exactButton) {
     const label = exactButton.querySelector("label.i18n");
     const labelText = getElementText(label || exactButton);
-    const info = getElementDebugInfo(exactButton, 1);
-
-    logToBackground(`[findArchiveDownloadButton] Exact selector candidate: ${formatElementDebugInfo(info)}`);
-    logToBackground(`[findArchiveDownloadButton] Exact selector label text: "${labelText}"`);
 
     if (label && labelText.trim() === "Завантажити все архівом") {
-      logToBackground(`[findArchiveDownloadButton] Selected exact saveAllButton with exact label match.`);
       return exactButton;
     }
-
-    logToBackground(`[findArchiveDownloadButton] saveAllButton found, but label does not match required text.`);
-  } else {
-    logToBackground(`[findArchiveDownloadButton] Exact selector div#saveAllButton.Block not found.`);
   }
 
-  const allCandidates = Array.from(document.querySelectorAll("div.Block, button, a, [role='button']"));
-  logToBackground(`[findArchiveDownloadButton] Debug candidates count: ${allCandidates.length}`);
-
-  allCandidates.forEach((el, index) => {
-    const info = getElementDebugInfo(el, index + 1);
-    logToBackground(`[findArchiveDownloadButton] Debug candidate ${formatElementDebugInfo(info)}`);
-  });
-
-  logToBackground(`[findArchiveDownloadButton] Required archive button was not found.`);
   return null;
 }
 
