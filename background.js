@@ -5,8 +5,8 @@ if (typeof importScripts !== "undefined") {
 
 // Browser-compatible mime object matching specifications
 const mime = {
-  lookup: function(filename) {
-    const ext = filename.toLowerCase().split('.').pop();
+  lookup: function (filename) {
+    const ext = filename.toLowerCase().split(".").pop();
     switch (ext) {
       case "pdf": return "application/pdf";
       case "xml": return "text/xml";
@@ -31,25 +31,21 @@ const mime = {
 /**
  * Safely resolves the MIME type of an attachment buffer using a hybrid approach:
  * 1. Inspects the first 8 bytes (Magic Bytes) to block malicious file masquerading.
- * 2. Falls back to the 'mime-types' library for standard extension-based resolution.
+ * 2. Falls back to the extension-based resolution.
  *
  * @param {ArrayBuffer} arrayBuffer - The raw binary data of the file.
  * @param {string} filename - The declared filename.
  * @returns {string} - Resolved secure MIME-type or "application/octet-stream".
  */
 function getSecureMimeType(arrayBuffer, filename) {
-  // Extract the first 8 bytes for signature analysis
   const uint8 = new Uint8Array(arrayBuffer.slice(0, 8));
   let hex = "";
   for (let i = 0; i < uint8.length; i++) {
-    hex += uint8[i].toString(16).padStart(2, '0').toUpperCase();
+    hex += uint8[i].toString(16).padStart(2, "0").toUpperCase();
   }
 
-  const ext = filename.toLowerCase().split('.').pop();
+  const ext = filename.toLowerCase().split(".").pop();
 
-  // --- STEP 1: CRITICAL SECURITY SIGNATURE GUARD ---
-  
-  // Intercept executable spoofing (e.g. virus.exe renamed to document.p7s)
   if (hex.startsWith("4D5A")) {
     logDebug(`SECURITY ALERT: File "${filename}" detected as Windows Executable (MZ). Aborting processing!`);
     return "application/x-msdownload";
@@ -59,18 +55,16 @@ function getSecureMimeType(arrayBuffer, filename) {
     return "application/x-elf";
   }
 
-  // Explicitly validate known structural types
   if (hex.startsWith("25504446")) {
     return "application/pdf";
   }
-  if (hex.startsWith("3C3F786D6C")) { // "<?xml"
+  if (hex.startsWith("3C3F786D6C")) {
     return "text/xml";
   }
-  if (hex.startsWith("3082") || hex.startsWith("3080")) { // DER ASN.1 structure
+  if (hex.startsWith("3082") || hex.startsWith("3080")) {
     return "application/pkcs7-signature";
   }
-  if (hex.startsWith("504B0304")) { // ZIP / ASiC container signature
-    // For ZIP structures, we use 'mime-types' to determine if it is .asics, .asice, or a generic .zip
+  if (hex.startsWith("504B0304")) {
     try {
       const lookedUpMime = mime.lookup(filename);
       if (lookedUpMime && lookedUpMime.includes("zip")) {
@@ -80,7 +74,6 @@ function getSecureMimeType(arrayBuffer, filename) {
     return "application/zip";
   }
 
-  // --- STEP 2: MULTI-PURPOSE MIME-TYPES FALLBACK ---
   try {
     return mime.lookup(filename) || "application/octet-stream";
   } catch (e) {
@@ -96,14 +89,19 @@ function logDebug(message) {
   const formattedLog = `[${timestamp}] ${message}`;
   diagnosticsLogs.push(formattedLog);
   console.log(formattedLog);
-  // Send log update to popup if connected
   try {
     browser.runtime.sendMessage({ action: "logAdded", log: formattedLog }).catch(() => {});
   } catch (e) {}
 }
 
-// Store download trackings
+// Store download tracking
 let lastSavedResult = null;
+
+// Keeps map of current tasks being verified
+let verificationTasks = {};
+
+// Keeps pending page-triggered downloads matched by requestId
+const pendingPageDownloads = new Map();
 
 // Get current options
 async function getOptions() {
@@ -127,7 +125,7 @@ function arrayBufferToBase64(buffer) {
 
 // Fast Base64 conversion helper matching specification
 function toBase64(uint8) {
-  let binary = '';
+  let binary = "";
   const chunk = 0x8000;
   for (let i = 0; i < uint8.length; i += chunk) {
     binary += String.fromCharCode(...uint8.subarray(i, i + chunk));
@@ -138,10 +136,8 @@ function toBase64(uint8) {
 // Stem normalization for fuzzy pairing
 function getStem(filename) {
   let name = filename.toLowerCase();
-  // Strip trailing extension and dot
   name = name.replace(/\.p7s$/, "");
   name = name.replace(/\.(pdf|xml|asics|asice|zip)$/, "");
-  // Strip punctuation, spaces, numbers in parens like " (1)" or "_signed"
   name = name.replace(/\s*\(\d+\)/g, "");
   name = name.replace(/[\s\-_+()]/g, "");
   return name;
@@ -152,6 +148,7 @@ function levenshteinDistance(s1, s2) {
   let memo = Array.from({ length: s1.length + 1 }, () => Array(s2.length + 1).fill(0));
   for (let i = 0; i <= s1.length; i++) memo[i][0] = i;
   for (let j = 0; j <= s2.length; j++) memo[0][j] = j;
+
   for (let i = 1; i <= s1.length; i++) {
     for (let j = 1; j <= s2.length; j++) {
       memo[i][j] = Math.min(
@@ -169,11 +166,15 @@ async function scanActiveMessage() {
   logDebug("Starting message scan...");
   try {
     const messageList = await browser.messageDisplay.getDisplayedMessages();
-    const displayedMessages = Array.isArray(messageList) ? messageList : (messageList && messageList.messages ? messageList.messages : []);
+    const displayedMessages = Array.isArray(messageList)
+      ? messageList
+      : (messageList && messageList.messages ? messageList.messages : []);
+
     if (!displayedMessages || displayedMessages.length === 0) {
       logDebug("No active message displayed in Thunderbird.");
       return { success: false, error: "No active message displayed." };
     }
+
     const msg = displayedMessages[0];
     logDebug(`Found displayed message: ID ${msg.id}, Subject: "${msg.subject}"`);
 
@@ -182,23 +183,20 @@ async function scanActiveMessage() {
 
     let filePool = [];
 
-    // Process attachments
     for (const attach of attachments) {
       logDebug(`Processing attachment: "${attach.name}" (${attach.size} bytes)`);
       try {
         const fileObj = await browser.messages.getAttachmentFile(msg.id, attach.partName);
         const arrayBuffer = await fileObj.arrayBuffer();
 
-        // --- HYBRID VALIDATION LAYER ---
         const detectedMime = getSecureMimeType(arrayBuffer, attach.name);
-        const ext = attach.name.toLowerCase().split('.').pop();
+        const ext = attach.name.toLowerCase().split(".").pop();
 
         logDebug(`Processing "${attach.name}": Declared Extension: .${ext} | Resolved MIME: ${detectedMime}`);
 
-        // Block processing of any executables detected via Magic Bytes
         if (detectedMime === "application/x-msdownload" || detectedMime === "application/x-elf") {
           logDebug(`Processing blocked for "${attach.name}" due to critical security threat (MIME mismatch).`);
-          continue; // Skip compilation of this file
+          continue;
         }
 
         if (ext === "zip") {
@@ -207,13 +205,11 @@ async function scanActiveMessage() {
             const zip = await JSZip.loadAsync(arrayBuffer);
             for (const [relativePath, zipEntry] of Object.entries(zip.files)) {
               if (zipEntry.dir) continue;
-              // Extract at root level only, no nested folders parsing required
               if (relativePath.includes("/")) continue;
 
               logDebug(`Extracted root file from ZIP: "${relativePath}"`);
               const contentBuffer = await zipEntry.async("arraybuffer");
 
-              // Validate zip entries as well
               const entryMime = getSecureMimeType(contentBuffer, relativePath);
               if (entryMime === "application/x-msdownload" || entryMime === "application/x-elf") {
                 logDebug(`SECURITY ALERT: Extracted file "${relativePath}" inside ZIP detected as Executable. Skipping file.`);
@@ -245,29 +241,23 @@ async function scanActiveMessage() {
 
     logDebug(`Total files collected in pool for matching: ${filePool.length}`);
 
-    // Pair/Categorize Candidates
-    // Supported file types: .p7s, .pdf, .xml, .asics, .asice, .zip
     const supportedExtensions = ["p7s", "pdf", "xml", "asics", "asice", "zip"];
     const candidates = [];
 
-    // Filter to only supported file extensions in pool
     const pool = filePool.filter(f => {
-      const parts = f.name.toLowerCase().split('.');
+      const parts = f.name.toLowerCase().split(".");
       const ext = parts[parts.length - 1];
       return supportedExtensions.includes(ext);
     });
 
     logDebug(`Pool filtered to supported types: ${pool.length} files`);
 
-    // Separate p7s signatures and potential payload/data files
     let sigFiles = pool.filter(f => f.name.toLowerCase().endsWith(".p7s"));
     let dataFiles = pool.filter(f => !f.name.toLowerCase().endsWith(".p7s"));
 
-    // Track matched data file names to avoid double pairing
     const matchedDataNames = new Set();
     const matchedSigNames = new Set();
 
-    // 1. Detached Signature Matching (fuzzy and stem matching)
     for (const sig of sigFiles) {
       const sigStem = getStem(sig.name);
       let bestMatch = null;
@@ -279,9 +269,8 @@ async function scanActiveMessage() {
         if (matchedDataNames.has(data.name)) continue;
 
         const dataStem = getStem(data.name);
-
-        // Check exact match, substring, or Levenshtein similarity
         let isMatch = false;
+
         if (sigStem === dataStem) {
           isMatch = true;
           logDebug(`Exact stem match: "${sig.name}" <-> "${data.name}"`);
@@ -297,7 +286,6 @@ async function scanActiveMessage() {
         }
 
         if (isMatch) {
-          // If multiple matches are possible, take the one with closest Levenshtein distance
           const dist = levenshteinDistance(sigStem, dataStem);
           if (dist < minDistance) {
             minDistance = dist;
@@ -319,7 +307,6 @@ async function scanActiveMessage() {
       }
     }
 
-    // 2. Unmatched signatures become single-p7s
     for (const sig of sigFiles) {
       if (matchedSigNames.has(sig.name)) continue;
       logDebug(`Signature "${sig.name}" is unmatched. Creating single-p7s scenario.`);
@@ -331,13 +318,10 @@ async function scanActiveMessage() {
       });
     }
 
-    // 3. Unmatched data files (.pdf, .xml, .asics, .asice) become single
     for (const data of dataFiles) {
       if (matchedDataNames.has(data.name)) continue;
 
-      const ext = data.name.toLowerCase().split('.').pop();
-      // Standalone ZIPs are typically already unpacked, but if a standalone zip was somehow unmatched, it's ok.
-      // Standalone .pdf, .xml, .asics, .asice
+      const ext = data.name.toLowerCase().split(".").pop();
       if (["pdf", "xml", "asics", "asice", "zip"].includes(ext)) {
         logDebug(`Standalone file "${data.name}" is unmatched. Creating single scenario.`);
         candidates.push({
@@ -357,73 +341,103 @@ async function scanActiveMessage() {
   }
 }
 
-// Keeps map of current tasks being verified
-let verificationTasks = {};
-
-// Verify candidate using CZO Automation background tab
-async function runVerificationTask(candidate, messageId) {
-  const options = await getOptions();
-  const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  logDebug(`[${candidate.label}] Starting verification task. scenario: ${candidate.scenario}, requestId: ${requestId}`);
-
-  // Put in verification map
-  verificationTasks[requestId] = {
-    candidate,
-    messageId,
-    status: "pending",
-    progress: "Creating background tab",
-    result: null
-  };
-
-  try {
-    // Open czo.gov.ua/verify in background tab
-    const url = "https://czo.gov.ua/verify";
-    logDebug(`[${candidate.label}] Creating CZO verification tab: ${url}`);
-    const tab = await browser.tabs.create({ url, active: false });
-
-    verificationTasks[requestId].tabId = tab.id;
-
-    // Set a safety timeout for overall verification flow (e.g. 5 minutes)
-    const safetyTimeout = setTimeout(async () => {
-      if (verificationTasks[requestId] && verificationTasks[requestId].status === "pending") {
-        logDebug(`[${candidate.label}] Verification task timed out.`);
-        verificationTasks[requestId].status = "error";
-        verificationTasks[requestId].progress = "Timeout reached during CZO automation.";
-        verificationTasks[requestId].error = "Verification process timed out.";
-        // Close the tab
-        try {
-          await browser.tabs.remove(tab.id);
-        } catch (e) {}
-        updatePopupProgress();
-      }
-    }, 300000); // 5 minutes
-
-    verificationTasks[requestId].timeoutId = safetyTimeout;
-
-    // Send the upload configurations to background tab via storage/cookies or message.
-    // Wait, content script is not yet loaded! So we will wait for it to report "ready" or poll.
-    // Content script runs inside frames, so it will ping us or we can listen to tab status.
-  } catch (err) {
-    logDebug(`[${candidate.label}] Error during tab creation: ${err.message}`);
-    verificationTasks[requestId].status = "error";
-    verificationTasks[requestId].progress = `Failed to create CZO tab: ${err.message}`;
-    verificationTasks[requestId].error = err.message;
-    updatePopupProgress();
-  }
-
-  return requestId;
-}
-
 // Broadcast real-time verification tasks status
 function updatePopupProgress() {
   try {
-    browser.runtime.sendMessage({ action: "progressUpdate", tasks: verificationTasks }).catch(() => {});
+    browser.runtime.sendMessage({ action: "progressUpdate", tasks: verificationTasks, lastSavedResult }).catch(() => {});
   } catch (e) {}
+}
+
+function cleanupPendingDownload(requestId) {
+  if (pendingPageDownloads.has(requestId)) {
+    pendingPageDownloads.delete(requestId);
+  }
+  const task = verificationTasks[requestId];
+  if (task) {
+    delete task.pendingDownload;
+  }
+}
+
+function sanitizeFilenamePart(name) {
+  return String(name || "")
+    .replace(/[<>:"|?*\x00-\x1F]/g, "_")
+    .replace(/[\\\/]+/g, "_")
+    .trim() || "download";
+}
+
+async function tryMatchRecentDownloadForTask(requestId) {
+  const task = verificationTasks[requestId];
+  if (!task || !task.pendingDownload) return null;
+
+  try {
+    const startedAfter = new Date(task.pendingDownload.startedAt - 2000).toISOString();
+    const results = await browser.downloads.search({
+      startedAfter,
+      limit: 20
+    });
+
+    if (!Array.isArray(results) || results.length === 0) {
+      return null;
+    }
+
+    const matched = results
+      .filter(item => {
+        if (!item) return false;
+        if (item.byExtensionId) return false;
+        const url = item.url || "";
+        const referrer = item.referrer || "";
+        return url.includes("czo.gov.ua") || referrer.includes("czo.gov.ua");
+      })
+      .sort((a, b) => {
+        const ta = new Date(a.startTime || 0).getTime();
+        const tb = new Date(b.startTime || 0).getTime();
+        return tb - ta;
+      })[0];
+
+    if (!matched) return null;
+
+    registerDownloadForTask(requestId, matched);
+    return matched;
+  } catch (err) {
+    logDebug(`[${task.candidate.label}] Failed to search recent downloads: ${err.message}`);
+    return null;
+  }
+}
+
+function registerDownloadForTask(requestId, downloadItem) {
+  const task = verificationTasks[requestId];
+  if (!task) return;
+
+  const fallbackName = task.pendingDownload?.expectedFilename || "archive.zip";
+  const absoluteOrName = downloadItem.filename || fallbackName;
+  const justName = absoluteOrName.split(/[\\/]/).pop() || fallbackName;
+
+  lastSavedResult = {
+    downloadId: downloadItem.id,
+    filename: justName,
+    filepath: absoluteOrName,
+    timestamp: Date.now(),
+    status: downloadItem.state || "in_progress",
+    source: "page-click"
+  };
+
+  task.lastDownloadId = downloadItem.id;
+  task.lastDownloadFilename = justName;
+  task.lastDownloadPath = absoluteOrName;
+
+  if (task.result) {
+    task.result.savedResult = lastSavedResult;
+  }
+
+  logDebug(`[${task.candidate.label}] Captured page-triggered download. ID=${downloadItem.id}, file="${justName}"`);
+  updatePopupProgress();
 }
 
 // Safely modify Thunderbird message tags
 async function updateMessageTags(messageId, status) {
   logDebug(`Updating message tags for message ID ${messageId}. Status: ${status}`);
+  let currentTags = [];
+
   try {
     const msg = await browser.messages.get(messageId);
     if (!msg) {
@@ -431,28 +445,23 @@ async function updateMessageTags(messageId, status) {
       return;
     }
 
-    let currentTags = msg.tags || [];
+    currentTags = msg.tags || [];
     logDebug(`Pre-existing tags: ${JSON.stringify(currentTags)}`);
 
-    // Clean existing tags from our keys
     currentTags = currentTags.filter(t => t !== "czo-verified" && t !== "czo-failed");
 
     if (status === "success") {
-      // Success tag czo-verified
       currentTags.push("czo-verified");
       logDebug(`Appending tag czo-verified.`);
     } else {
-      // Failure tag czo-failed
       currentTags.push("czo-failed");
       logDebug(`Appending tag czo-failed.`);
     }
 
-    // Attempt to merge tags using update
     await browser.messages.update(messageId, { tags: currentTags });
     logDebug(`Successfully updated tags: ${JSON.stringify(currentTags)}`);
   } catch (err) {
     logDebug(`Error updating message tags: ${err.message}. Trying fallback.`);
-    // Fallback tag update logic if update fails (some environments might use message.update)
     try {
       if (browser.messages.setTags) {
         await browser.messages.setTags(messageId, currentTags);
@@ -464,25 +473,112 @@ async function updateMessageTags(messageId, status) {
   }
 }
 
-// Silent automatic download handler
-async function handleSilentDownload(requestId, downloadButtonId) {
-  const taskInfo = verificationTasks[requestId];
-  if (!taskInfo) return;
+// Verify candidate using CZO Automation background tab
+async function runVerificationTask(candidate, messageId) {
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  logDebug(`[${candidate.label}] Starting verification task. scenario: ${candidate.scenario}, requestId: ${requestId}`);
 
-  const options = await getOptions();
-  logDebug(`[${taskInfo.candidate.label}] Requesting silent download from content script. Subfolder: "${options.subfolder}"`);
+  verificationTasks[requestId] = {
+    candidate,
+    messageId,
+    status: "pending",
+    progress: "Creating background tab",
+    result: null,
+    tabId: null,
+    timeoutId: null,
+    pendingDownload: null,
+    lastDownloadId: null,
+    lastDownloadFilename: null,
+    lastDownloadPath: null
+  };
 
-  // We ask the tab to click the specific download button and download.
-  // Wait, the specification says:
-  // "If the CZO page provides a verification receipt or file, it must be downloaded automatically without displaying the system "Save As" file picker dialog"
-  // If we download via the extension downloads API, how do we get the URL?
-  // The content script can fetch the blob URL and send it to us, and we download it!
-  // Yes! The content script can extract the blob URL or object URL from the download button, and send it to the background script,
-  // then background.js can use browser.downloads.download() with that blob URL!
-  // This is extremely robust and completely avoids any "Save As" prompt!
+  try {
+    const url = "https://czo.gov.ua/verify";
+    logDebug(`[${candidate.label}] Creating CZO verification tab: ${url}`);
+    const tab = await browser.tabs.create({ url, active: false });
+
+    verificationTasks[requestId].tabId = tab.id;
+
+    const safetyTimeout = setTimeout(async () => {
+      if (verificationTasks[requestId] && verificationTasks[requestId].status === "pending") {
+        logDebug(`[${candidate.label}] Verification task timed out.`);
+        verificationTasks[requestId].status = "error";
+        verificationTasks[requestId].progress = "Timeout reached during CZO automation.";
+        verificationTasks[requestId].error = "Verification process timed out.";
+        cleanupPendingDownload(requestId);
+        try {
+          await browser.tabs.remove(tab.id);
+        } catch (e) {}
+        updatePopupProgress();
+      }
+    }, 300000);
+
+    verificationTasks[requestId].timeoutId = safetyTimeout;
+    updatePopupProgress();
+  } catch (err) {
+    logDebug(`[${candidate.label}] Error during tab creation: ${err.message}`);
+    verificationTasks[requestId].status = "error";
+    verificationTasks[requestId].progress = `Failed to create CZO tab: ${err.message}`;
+    verificationTasks[requestId].error = err.message;
+    updatePopupProgress();
+  }
+
+  return requestId;
 }
 
-// Download a blob URL safely
+// Silent automatic download handler via page-side click
+async function handleSilentDownload(requestId, downloadButtonId) {
+  const taskInfo = verificationTasks[requestId];
+  if (!taskInfo || !taskInfo.tabId) return;
+
+  const options = await getOptions();
+  let folder = options.subfolder || "CZO-Verify-Results";
+  folder = folder.replace(/[\\\/]+/g, "/").replace(/^\/|\/$/g, "");
+
+  const expectedFilename = sanitizeFilenamePart(
+    `${taskInfo.candidate.label}-archive-${new Date().toISOString().replace(/[:.]/g, "-")}.zip`
+  );
+
+  taskInfo.pendingDownload = {
+    startedAt: Date.now(),
+    folder,
+    expectedFilename,
+    source: "page-click",
+    buttonId: downloadButtonId || null
+  };
+
+  pendingPageDownloads.set(requestId, {
+    tabId: taskInfo.tabId,
+    startedAt: taskInfo.pendingDownload.startedAt
+  });
+
+  taskInfo.progress = 'Triggering page click on "Завантажити все архівом"';
+  logDebug(`[${taskInfo.candidate.label}] Requesting content script to click archive download button. Subfolder="${folder}" ButtonId="${downloadButtonId || ""}"`);
+
+  try {
+    await browser.tabs.sendMessage(taskInfo.tabId, {
+      action: "clickArchiveDownload",
+      requestId,
+      downloadButtonId: downloadButtonId || null
+    });
+
+    setTimeout(() => {
+      tryMatchRecentDownloadForTask(requestId);
+    }, 2000);
+
+    setTimeout(() => {
+      tryMatchRecentDownloadForTask(requestId);
+    }, 5000);
+
+    updatePopupProgress();
+  } catch (err) {
+    logDebug(`[${taskInfo.candidate.label}] Failed to request page-side download click: ${err.message}`);
+    taskInfo.progress = `Failed to trigger archive button: ${err.message}`;
+    updatePopupProgress();
+  }
+}
+
+// Legacy direct blob-url download fallback
 async function downloadBlobUrl(requestId, blobUrl, filename) {
   const taskInfo = verificationTasks[requestId];
   if (!taskInfo) return;
@@ -490,10 +586,11 @@ async function downloadBlobUrl(requestId, blobUrl, filename) {
   try {
     const options = await getOptions();
     let folder = options.subfolder || "CZO-Verify-Results";
-    // clean folder slashes
     folder = folder.replace(/[\\\/]+/g, "/").replace(/^\/|\/$/g, "");
 
-    const targetFilename = folder ? `${folder}/${filename}` : filename;
+    const safeName = sanitizeFilenamePart(filename || "receipt.bin");
+    const targetFilename = folder ? `${folder}/${safeName}` : safeName;
+
     logDebug(`[${taskInfo.candidate.label}] Triggering browser.downloads.download for url: ${blobUrl.substring(0, 100)}... to filename: ${targetFilename}`);
 
     const downloadId = await browser.downloads.download({
@@ -505,13 +602,13 @@ async function downloadBlobUrl(requestId, blobUrl, filename) {
 
     logDebug(`[${taskInfo.candidate.label}] Download started. Download ID: ${downloadId}`);
 
-    // Track last downloaded
     lastSavedResult = {
       downloadId,
-      filename,
+      filename: safeName,
       filepath: targetFilename,
       timestamp: Date.now(),
-      status: "downloading"
+      status: "downloading",
+      source: "extension-download"
     };
 
     if (taskInfo.result) {
@@ -524,7 +621,33 @@ async function downloadBlobUrl(requestId, blobUrl, filename) {
   }
 }
 
-// Listen to download completions
+// Listen for created downloads and try to associate with pending CZO task
+browser.downloads.onCreated.addListener((downloadItem) => {
+  try {
+    const activePending = Object.entries(verificationTasks).find(([requestId, task]) => {
+      if (!task || !task.pendingDownload) return false;
+      const now = Date.now();
+      const age = now - task.pendingDownload.startedAt;
+      if (age > 30000) return false;
+
+      const url = downloadItem.url || "";
+      const referrer = downloadItem.referrer || "";
+
+      return !downloadItem.byExtensionId &&
+        (url.includes("czo.gov.ua") || referrer.includes("czo.gov.ua"));
+    });
+
+    if (!activePending) return;
+
+    const [requestId, task] = activePending;
+    registerDownloadForTask(requestId, downloadItem);
+    logDebug(`[${task.candidate.label}] downloads.onCreated matched download ID ${downloadItem.id}`);
+  } catch (err) {
+    logDebug(`Error in downloads.onCreated handler: ${err.message}`);
+  }
+});
+
+// Listen to download completions and state changes
 browser.downloads.onChanged.addListener((delta) => {
   if (lastSavedResult && delta.id === lastSavedResult.downloadId) {
     if (delta.state) {
@@ -532,7 +655,28 @@ browser.downloads.onChanged.addListener((delta) => {
       logDebug(`Download ID ${delta.id} state changed to ${delta.state.current}`);
       if (delta.state.current === "complete") {
         lastSavedResult.completedTimestamp = Date.now();
+
+        const matchedTask = Object.values(verificationTasks).find(task => task.lastDownloadId === delta.id);
+        if (matchedTask) {
+          matchedTask.progress = "Verification receipt/archive downloaded successfully";
+        }
       }
+      updatePopupProgress();
+    }
+
+    if (delta.filename && delta.filename.current) {
+      lastSavedResult.filepath = delta.filename.current;
+      lastSavedResult.filename = delta.filename.current.split(/[\\/]/).pop() || lastSavedResult.filename;
+
+      const matchedTask = Object.values(verificationTasks).find(task => task.lastDownloadId === delta.id);
+      if (matchedTask) {
+        matchedTask.lastDownloadPath = delta.filename.current;
+        matchedTask.lastDownloadFilename = lastSavedResult.filename;
+        if (matchedTask.result) {
+          matchedTask.result.savedResult = lastSavedResult;
+        }
+      }
+
       updatePopupProgress();
     }
   }
@@ -542,7 +686,6 @@ browser.downloads.onChanged.addListener((delta) => {
 async function runAllVerifications(candidateIds, messageId) {
   logDebug(`Requested verification for candidates: ${JSON.stringify(candidateIds)}`);
 
-  // We need current candidates list
   const scanResult = await scanActiveMessage();
   if (!scanResult.success) {
     logDebug("Failed to fetch candidates for running verification.");
@@ -558,8 +701,6 @@ async function runAllVerifications(candidateIds, messageId) {
     requestIds.push(requestId);
   }
 
-  // Monitor verification state to determine final tags
-  // Wait, let's periodically poll or check if all requestIds are resolved.
   const intervalId = setInterval(async () => {
     let allFinished = true;
     let anyError = false;
@@ -568,15 +709,14 @@ async function runAllVerifications(candidateIds, messageId) {
     for (const reqId of requestIds) {
       const task = verificationTasks[reqId];
       if (!task) continue;
+
       if (task.status === "pending") {
         allFinished = false;
       } else if (task.status === "error") {
         anyError = true;
         allSuccess = false;
       } else if (task.status === "ok") {
-        // success
       } else {
-        // unknown or anything else is treated as not perfectly success
         allSuccess = false;
       }
     }
@@ -599,32 +739,37 @@ browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
     sendResponse({ logs: diagnosticsLogs });
     return true;
   }
-  else if (request.action === "clearLogs") {
+
+  if (request.action === "clearLogs") {
     diagnosticsLogs = [];
     sendResponse({ success: true });
     return true;
   }
-  else if (request.action === "scan") {
+
+  if (request.action === "scan") {
     scanActiveMessage().then(sendResponse);
-    return true; // Keep message channel open for async response
+    return true;
   }
-  else if (request.action === "verifySelected") {
+
+  if (request.action === "verifySelected") {
     runAllVerifications(request.candidateIds, request.messageId).then(() => {
       sendResponse({ success: true });
     });
     return true;
   }
-  else if (request.action === "getTasks") {
+
+  if (request.action === "getTasks") {
     sendResponse({ tasks: verificationTasks, lastSavedResult });
     return true;
   }
-  else if (request.action === "getLastSavedResult") {
+
+  if (request.action === "getLastSavedResult") {
     sendResponse({ lastSavedResult });
     return true;
   }
 
   // --- Content Script Interaction ---
-  else if (request.action === "widgetReady") {
+  if (request.action === "widgetReady") {
     const senderTabId = sender.tab ? sender.tab.id : null;
     logDebug(`Content script reported ready in tab ID ${senderTabId}. Frame URL: ${sender.url}`);
 
@@ -649,25 +794,43 @@ browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
         logDebug(`No matching pending task found for tab ID ${senderTabId}.`);
       }
     }
+
+    sendResponse({ success: true });
+    return true;
   }
 
-  else if (request.action === "reportProgress") {
+  if (request.action === "reportProgress") {
     const { requestId, progress } = request;
     if (verificationTasks[requestId]) {
       verificationTasks[requestId].progress = progress;
       logDebug(`[${verificationTasks[requestId].candidate.label}] Progress: ${progress}`);
       updatePopupProgress();
     }
+    sendResponse({ success: true });
+    return true;
   }
 
-  else if (request.action === "reportResult") {
-    const { requestId, status, resultText, errorText, receiptBlobUrl, receiptFilename } = request;
+  if (request.action === "reportResult") {
+    const {
+      requestId,
+      status,
+      resultText,
+      errorText,
+      receiptBlobUrl,
+      receiptFilename,
+      autoDownloadArchive,
+      downloadButtonId
+    } = request;
+
     logDebug(`[verification result] for request ${requestId}. status: ${status}`);
 
     if (verificationTasks[requestId]) {
       const task = verificationTasks[requestId];
       task.status = status;
-      task.progress = status === "ok" ? "Verification Completed Successfully" : "Verification Failed";
+      task.progress = status === "ok"
+        ? "Verification Completed Successfully"
+        : "Verification Failed";
+
       task.result = {
         scenario: task.candidate.scenario,
         status,
@@ -676,17 +839,21 @@ browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
         savedResult: null
       };
 
-      // Clear safety timeout
       if (task.timeoutId) {
         clearTimeout(task.timeoutId);
       }
 
-      // Automatically download receipt if provided
-      if (receiptBlobUrl && receiptFilename) {
+      // Preferred flow: ask content script to click "Завантажити все архівом"
+      if (autoDownloadArchive) {
+        handleSilentDownload(requestId, downloadButtonId).catch(err => {
+          logDebug(`[${task.candidate.label}] handleSilentDownload failed: ${err.message}`);
+        });
+      }
+      // Fallback: direct extension download if blob URL is explicitly provided
+      else if (receiptBlobUrl && receiptFilename) {
         downloadBlobUrl(requestId, receiptBlobUrl, receiptFilename);
       }
 
-      // Close background tab after a short delay
       setTimeout(async () => {
         try {
           if (task.tabId) {
@@ -695,17 +862,51 @@ browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
           }
         } catch (e) {
           logDebug(`Error closing tab: ${e.message}`);
+        } finally {
+          cleanupPendingDownload(requestId);
         }
-      }, 5000);
+      }, 15000);
 
       updatePopupProgress();
     }
+
     sendResponse({ success: true });
+    return true;
   }
 
-  else if (request.action === "downloadReceipt") {
+  // Content script says it clicked archive button successfully
+  if (request.action === "archiveDownloadClickDone") {
+    const { requestId } = request;
+    const task = verificationTasks[requestId];
+    if (task) {
+      task.progress = 'Archive button clicked; waiting for browser download';
+      logDebug(`[${task.candidate.label}] Content script reported archive click completed.`);
+      updatePopupProgress();
+    }
+    sendResponse({ success: true });
+    return true;
+  }
+
+  // Content script says it failed to click archive button
+  if (request.action === "archiveDownloadClickFailed") {
+    const { requestId, error } = request;
+    const task = verificationTasks[requestId];
+    if (task) {
+      task.progress = `Archive click failed: ${error}`;
+      logDebug(`[${task.candidate.label}] Content script failed to click archive button: ${error}`);
+      updatePopupProgress();
+    }
+    sendResponse({ success: true });
+    return true;
+  }
+
+  // Legacy manual download request path
+  if (request.action === "downloadReceipt") {
     const { requestId, blobUrl, filename } = request;
     downloadBlobUrl(requestId, blobUrl, filename);
     sendResponse({ success: true });
+    return true;
   }
+
+  return false;
 });
