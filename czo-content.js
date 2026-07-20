@@ -425,7 +425,7 @@ function pollForVerificationResults() {
       return;
     }
 
-    // Trigger secure downloads for ZIP and PDF anchors if they are populated
+    // Automatically download only the ZIP archive result if populated
     if (zipAnchor && zipAnchor.href) {
       const zipBlobUrl = new URL(zipAnchor.href, window.location.href).href;
       const zipFilename = zipAnchor.download || "verification-receipt.zip";
@@ -441,24 +441,6 @@ function pollForVerificationResults() {
       try {
         zipAnchor.click();
         logToBackground("Programmatic click on ZIP receipt button triggered.");
-      } catch (clickErr) {}
-    }
-
-    if (pdfAnchor && pdfAnchor.href) {
-      const pdfBlobUrl = new URL(pdfAnchor.href, window.location.href).href;
-      const pdfFilename = pdfAnchor.download || "Validation_Report.pdf";
-      browser.runtime.sendMessage({
-        action: "downloadReceipt",
-        requestId: contentRequestId,
-        blobUrl: pdfBlobUrl,
-        filename: pdfFilename
-      }).catch(() => {});
-      logToBackground(`Triggered secure download for PDF report: ${pdfFilename}`);
-    } else if (pdfAnchor) {
-      // Fallback programmatic click
-      try {
-        pdfAnchor.click();
-        logToBackground("Programmatic click on PDF report button triggered.");
       } catch (clickErr) {}
     }
 
