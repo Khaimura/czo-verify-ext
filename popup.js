@@ -15,6 +15,7 @@ const btnShowFolder = document.getElementById("btn-show-folder");
 const logConsole = document.getElementById("log-console");
 const btnCopyLog = document.getElementById("btn-copy-log");
 const btnClearLog = document.getElementById("btn-clear-log");
+const logPanel = document.getElementById("log-panel");
 
 // Open options page
 btnOptions.addEventListener("click", (e) => {
@@ -103,6 +104,14 @@ function renderCandidates(candidates) {
 
 // Fetch and render diagnostics logs
 async function updateLogs() {
+  // Check if verbose mode is enabled in options before retrieving or updating logs
+  const settings = await browser.storage.local.get({ verbose: false });
+  if (!settings.verbose) {
+    if (logPanel) logPanel.style.display = "none";
+    return;
+  }
+  if (logPanel) logPanel.style.display = "block";
+
   const response = await browser.runtime.sendMessage({ action: "getLogs" });
   if (response && response.logs) {
     logConsole.value = response.logs.join("\n");
@@ -125,8 +134,14 @@ btnShowFolder.addEventListener("click", () => {
 
 // Synchronize all status tasks and logs from background
 async function syncStatusAndLogs() {
-  // Sync Logs
-  await updateLogs();
+  // Retrieve verbose setting first
+  const settings = await browser.storage.local.get({ verbose: false });
+  if (settings.verbose) {
+    if (logPanel) logPanel.style.display = "block";
+    await updateLogs();
+  } else {
+    if (logPanel) logPanel.style.display = "none";
+  }
 
   // Sync Tasks & Download widget
   const res = await browser.runtime.sendMessage({ action: "getTasks" });
@@ -227,7 +242,10 @@ btnScan.addEventListener("click", async () => {
   } finally {
     btnScan.disabled = false;
   }
-  await updateLogs();
+  const settings = await browser.storage.local.get({ verbose: false });
+  if (settings.verbose) {
+    await updateLogs();
+  }
 });
 
 // Trigger verification
@@ -249,11 +267,14 @@ btnVerify.addEventListener("click", async () => {
 });
 
 // Real-time log/status update listener
-browser.runtime.onMessage.addListener((msg) => {
+browser.runtime.onMessage.addListener(async (msg) => {
   if (msg.action === "logAdded") {
-    // Fast append
-    logConsole.value += "\n" + msg.log;
-    logConsole.scrollTop = logConsole.scrollHeight;
+    const settings = await browser.storage.local.get({ verbose: false });
+    if (settings.verbose) {
+      // Fast append
+      logConsole.value += "\n" + msg.log;
+      logConsole.scrollTop = logConsole.scrollHeight;
+    }
   } else if (msg.action === "progressUpdate") {
     syncStatusAndLogs();
   }

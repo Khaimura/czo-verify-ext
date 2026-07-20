@@ -11,7 +11,7 @@ async function loadOptions() {
     const res = await browser.storage.local.get({
       subfolder: "CZO-Verify-Results",
       askWhereToSave: false,
-      verbose: true
+      verbose: false
     });
 
     subfolderInput.value = res.subfolder;

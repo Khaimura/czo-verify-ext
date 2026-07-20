@@ -108,7 +108,7 @@ async function getOptions() {
   const defaults = {
     subfolder: "CZO-Verify-Results",
     askWhereToSave: false,
-    verbose: true
+    verbose: false
   };
   try {
     const res = await browser.storage.local.get(["subfolder", "askWhereToSave", "verbose"]);
@@ -733,7 +733,9 @@ async function runAllVerifications(candidateIds, messageId) {
 
 // Receive messages from content script, popup, and options
 browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  logDebug(`Message received: action = ${request.action}`);
+  if (request.action !== "getLogs" && request.action !== "getTasks") {
+    logDebug(`Message received: action = ${request.action}`);
+  }
 
   if (request.action === "getLogs") {
     sendResponse({ logs: diagnosticsLogs });
