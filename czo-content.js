@@ -355,7 +355,7 @@ async function handleInjectAndVerify(payload) {
 
     logToBackground("Triggering programmatic click on Verify button...");
     checkBtn.click();
-    logToBackground("Verify ('Перевірити') button clicked.");
+    logToBackground("Verify ('РџРµСЂРµРІС–СЂРёС‚Рё') button clicked.");
 
     pollForVerificationResults();
   } catch (clickErr) {
@@ -429,7 +429,7 @@ function findArchiveDownloadButton(downloadButtonId = null) {
       if (
         byId.id === "saveAllButton" &&
         label &&
-        labelText.trim() === "Завантажити все архівом"
+        labelText.trim() === "Р—Р°РІР°РЅС‚Р°Р¶РёС‚Рё РІСЃРµ Р°СЂС…С–РІРѕРј"
       ) {
         logToBackground(`[findArchiveDownloadButton] Explicit id matched exact saveAllButton.`);
         return byId;
@@ -450,7 +450,7 @@ function findArchiveDownloadButton(downloadButtonId = null) {
     logToBackground(`[findArchiveDownloadButton] Exact selector candidate: ${formatElementDebugInfo(info)}`);
     logToBackground(`[findArchiveDownloadButton] Exact selector label text: "${labelText}"`);
 
-    if (label && labelText.trim() === "Завантажити все архівом") {
+    if (label && labelText.trim() === "Р—Р°РІР°РЅС‚Р°Р¶РёС‚Рё РІСЃРµ Р°СЂС…С–РІРѕРј") {
       logToBackground(`[findArchiveDownloadButton] Selected exact saveAllButton with exact label match.`);
       return exactButton;
     }
@@ -479,7 +479,7 @@ async function handleClickArchiveDownload(message) {
     const button = findArchiveDownloadButton(message.downloadButtonId || null);
 
     if (!button) {
-      const err = 'Button "Завантажити все архівом" not found';
+      const err = 'Button "Р—Р°РІР°РЅС‚Р°Р¶РёС‚Рё РІСЃРµ Р°СЂС…С–РІРѕРј" not found';
       logToBackground(err);
       await browser.runtime.sendMessage({
         action: "archiveDownloadClickFailed",
@@ -533,15 +533,15 @@ function containsStrongErrorSignal(textLower, errorText) {
   if (errorText) return true;
 
   const errorPhrases = [
-    "невірний",
-    "помилка",
-    "не підтримується",
-    "помилка зчитування",
-    "не містить",
-    "не знайдено",
-    "відсутні",
-    "відсутній",
-    "немає",
+    "РЅРµРІС–СЂРЅРёР№",
+    "РїРѕРјРёР»РєР°",
+    "РЅРµ РїС–РґС‚СЂРёРјСѓС”С‚СЊСЃСЏ",
+    "РїРѕРјРёР»РєР° Р·С‡РёС‚СѓРІР°РЅРЅСЏ",
+    "РЅРµ РјС–СЃС‚РёС‚СЊ",
+    "РЅРµ Р·РЅР°Р№РґРµРЅРѕ",
+    "РІС–РґСЃСѓС‚РЅС–",
+    "РІС–РґСЃСѓС‚РЅС–Р№",
+    "РЅРµРјР°С”",
     "invalid",
     "error"
   ];
@@ -629,7 +629,7 @@ function pollForVerificationResults() {
 
   if (resultPollingCount >= maxResultPollingCount) {
     logToBackground("Reached maximum results polling duration. Checking if partial results exist.");
-    if (widgetText.includes("Підпис") || widgetText.includes("Протокол")) {
+    if (widgetText.includes("РџС–РґРїРёСЃ") || widgetText.includes("РџСЂРѕС‚РѕРєРѕР»")) {
       reportOutcome("ok", "Verification completed with partial results.", "", null, "", false, null);
     } else {
       reportOutcome("unknown", "", "CZO portal is taking too long to respond. Automated timeout.", null, "", false, null);
