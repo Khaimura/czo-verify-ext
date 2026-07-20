@@ -1,18 +1,22 @@
 // czo-content.js - DOM interaction, file injection, verification trigger, and result parsing
+
 let contentRequestId = null;
 let injectionTriggered = false;
+let resultPollingCount = 0;
+const maxResultPollingCount = 60;
+let signInfoFoundTicks = 0;
+let readyChecked = false;
 
 function logToBackground(progress) {
   if (contentRequestId) {
     browser.runtime.sendMessage({
       action: "reportProgress",
       requestId: contentRequestId,
-      progress: progress
+      progress
     }).catch(() => {});
   }
 }
 
-// Helper to convert Base64 back to Blob/Uint8Array (equivalent to base64ToBytes)
 function base64ToUint8Array(base64) {
   const binaryString = atob(base64);
   const len = binaryString.length;
@@ -23,14 +27,12 @@ function base64ToUint8Array(base64) {
   return bytes;
 }
 
-// Alias matching specifications
 function base64ToBytes(base64) {
   return base64ToUint8Array(base64);
 }
 
-// Fallback extension-based MIME-type mapper
 function getExtensionMimeType(ext) {
-  switch (ext) {
+  switch ((ext || "").toLowerCase()) {
     case "pdf": return "application/pdf";
     case "xml": return "text/xml";
     case "p7s": return "application/pkcs7-signature";
@@ -41,13 +43,11 @@ function getExtensionMimeType(ext) {
   }
 }
 
-// Deterministic MIME-type detector based on "magic bytes" (file signatures)
-// with extension-based fallback for unmatched or archive-based formats.
 function getSecureMimeType(filename, bytes) {
   let mime = "";
+
   try {
     if (bytes && bytes.length >= 2) {
-      // Helper to convert bytes to hex string
       let hex = "";
       const len = Math.min(bytes.length, 8);
       for (let i = 0; i < len; i++) {
@@ -59,12 +59,12 @@ function getSecureMimeType(filename, bytes) {
         mime = "image/png";
       } else if (hex.startsWith("FFD8FF")) {
         mime = "image/jpeg";
-      } else if (hex.startsWith("25504446")) { // %PDF
+      } else if (hex.startsWith("25504446")) {
         mime = "application/pdf";
-      } else if (hex.startsWith("474946383761") || hex.startsWith("474946383961")) { // GIF87a / GIF89a
+      } else if (hex.startsWith("474946383761") || hex.startsWith("474946383961")) {
         mime = "image/gif";
-      } else if (hex.startsWith("504B0304")) { // PK.. (ZIP, ASICS, ASICE, etc.)
-        const ext = filename.toLowerCase().split('.').pop();
+      } else if (hex.startsWith("504B0304")) {
+        const ext = filename.toLowerCase().split(".").pop();
         if (ext === "asics" || ext === "asice" || ext === "zip") {
           mime = "application/zip";
         } else {
@@ -74,6 +74,10 @@ function getSecureMimeType(filename, bytes) {
         mime = "application/x-elf";
       } else if (hex.startsWith("4D5A")) {
         mime = "application/x-msdownload";
+      } else if (hex.startsWith("3C3F786D6C")) {
+        mime = "text/xml";
+      } else if (hex.startsWith("3082") || hex.startsWith("3080")) {
+        mime = "application/pkcs7-signature";
       }
     }
   } catch (err) {
@@ -81,15 +85,15 @@ function getSecureMimeType(filename, bytes) {
   }
 
   if (!mime) {
-    const ext = filename.toLowerCase().split('.').pop();
+    const ext = filename.toLowerCase().split(".").pop();
     mime = getExtensionMimeType(ext);
   }
-  return mime;
+
+  return mime || "application/octet-stream";
 }
 
-// Base64 conversion helper matching specification
 function toBase64(uint8) {
-  let binary = '';
+  let binary = "";
   const chunk = 0x8000;
   for (let i = 0; i < uint8.length; i += chunk) {
     binary += String.fromCharCode(...uint8.subarray(i, i + chunk));
@@ -97,7 +101,6 @@ function toBase64(uint8) {
   return btoa(binary);
 }
 
-// makeFile restoring the original file from its text representation matching specification
 function makeFile(fileInfo) {
   const b64 = fileInfo.base64 || fileInfo.content;
   const bytes = base64ToBytes(b64);
@@ -105,26 +108,29 @@ function makeFile(fileInfo) {
   return new File([bytes], fileInfo.name, { type: mimeType });
 }
 
-// setFilesOnInput loading File objects programmatically into file selection field matching specification
 function setFilesOnInput(input, files) {
   const dt = new DataTransfer();
   for (const f of files) dt.items.add(f);
   input.files = dt.files;
-  input.dispatchEvent(new Event('input', {bubbles:true}));
-  input.dispatchEvent(new Event('change', {bubbles:true}));
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  input.dispatchEvent(new Event("change", { bubbles: true }));
   return dt;
 }
 
-// Convert message file payloads to File objects
 function buildFileObjects(filesData) {
   return filesData.map(makeFile);
 }
 
-// Inject files function matching specification, using fallback direct dropzone / synthetic drag events
 function injectFiles(files) {
   try {
-    const input = document.querySelector("#chooseFilesInput") || document.querySelector("input[type=file]");
-    const dropZone = document.querySelector("#filesDropZone") || document.querySelector(".drop-zone") || document.querySelector(".dropzone");
+    const input =
+      document.querySelector("#chooseFilesInput") ||
+      document.querySelector("input[type=file]");
+
+    const dropZone =
+      document.querySelector("#filesDropZone") ||
+      document.querySelector(".drop-zone") ||
+      document.querySelector(".dropzone");
 
     if (!input) {
       logToBackground("CZO Input element not found in DOM.");
@@ -132,20 +138,32 @@ function injectFiles(files) {
     }
 
     logToBackground("Injecting files into DOM input element...");
-    // 1. Standard Input Injection via setFilesOnInput
     const dataTransfer = setFilesOnInput(input, files);
     logToBackground("Standard file input change and input events dispatched.");
 
-    // Define standard drag/drop properties on DataTransfer object to match manual trace exactly
     try {
-      Object.defineProperty(dataTransfer, 'dropEffect', { value: 'copy', writable: true, configurable: true, enumerable: true });
-      Object.defineProperty(dataTransfer, 'effectAllowed', { value: 'copy', writable: true, configurable: true, enumerable: true });
-      Object.defineProperty(dataTransfer, 'types', { value: ['Files'], writable: true, configurable: true, enumerable: true });
+      Object.defineProperty(dataTransfer, "dropEffect", {
+        value: "copy",
+        writable: true,
+        configurable: true,
+        enumerable: true
+      });
+      Object.defineProperty(dataTransfer, "effectAllowed", {
+        value: "copy",
+        writable: true,
+        configurable: true,
+        enumerable: true
+      });
+      Object.defineProperty(dataTransfer, "types", {
+        value: ["Files"],
+        writable: true,
+        configurable: true,
+        enumerable: true
+      });
     } catch (e) {
       console.warn("Failed to set DataTransfer properties:", e.message);
     }
 
-    // 2. Direct Dropzone addFile Injection
     if (dropZone && dropZone.dropzone) {
       logToBackground("Direct Dropzone instance detected. Calling addFile...");
       for (const file of files) {
@@ -154,18 +172,16 @@ function injectFiles(files) {
       return true;
     }
 
-    // 3. Drag & Drop Fallback Simulation matching manual container trace
-    // The CZO page's active uploader container is main > section.form-block > div.container-fluid
-    const container = document.querySelector("main > section.form-block > div.container-fluid") ||
-                      document.querySelector(".container-fluid") ||
-                      document.querySelector("#filesDropZone") ||
-                      document.querySelector(".drop-zone") ||
-                      dropZone;
+    const container =
+      document.querySelector("main > section.form-block > div.container-fluid") ||
+      document.querySelector(".container-fluid") ||
+      document.querySelector("#filesDropZone") ||
+      document.querySelector(".drop-zone") ||
+      dropZone;
 
     if (container && dataTransfer) {
       logToBackground("Simulating drag & drop sequence on container...");
-      
-      // 1. dragenter
+
       const dragEnterEvent = new DragEvent("dragenter", {
         bubbles: true,
         cancelable: true
@@ -178,7 +194,6 @@ function injectFiles(files) {
       });
       container.dispatchEvent(dragEnterEvent);
 
-      // 2. dragover
       const dragOverEvent = new DragEvent("dragover", {
         bubbles: true,
         cancelable: true
@@ -191,7 +206,6 @@ function injectFiles(files) {
       });
       container.dispatchEvent(dragOverEvent);
 
-      // 3. drop
       const dropEvent = new DragEvent("drop", {
         bubbles: true,
         cancelable: true
@@ -203,8 +217,10 @@ function injectFiles(files) {
         enumerable: true
       });
       container.dispatchEvent(dropEvent);
+
       logToBackground("Dragover and Drop events simulated with defined dataTransfer on container.");
     }
+
     return true;
   } catch (err) {
     logToBackground(`File injection error: ${err.message}`);
@@ -212,17 +228,36 @@ function injectFiles(files) {
   }
 }
 
-// Poll to find target elements and announce readiness to background.js
-let readyChecked = false;
+function getVerifyButton() {
+  return (
+    document.querySelector("#checkButton") ||
+    document.querySelector("button.verify-btn") ||
+    document.querySelector("button#checkButton")
+  );
+}
+
+function getInputElement() {
+  return (
+    document.querySelector("#chooseFilesInput") ||
+    document.querySelector("input[type=file]")
+  );
+}
+
+function getDropZone() {
+  return (
+    document.querySelector("#filesDropZone") ||
+    document.querySelector(".drop-zone") ||
+    document.querySelector(".dropzone")
+  );
+}
+
 function pollForWidgetReady() {
-  // Prevent double-checking on frame reload
   if (readyChecked) return;
 
-  const input = document.querySelector("#chooseFilesInput") || document.querySelector("input[type=file]");
-  const dropZone = document.querySelector("#filesDropZone") || document.querySelector(".drop-zone") || document.querySelector(".dropzone");
-  const checkBtn = document.querySelector("#checkButton") || document.querySelector("button.verify-btn") || document.querySelector("button#checkButton");
+  const input = getInputElement();
+  const dropZone = getDropZone();
+  const checkBtn = getVerifyButton();
 
-  // We are inside the target frame if all critical elements (including dropZone) are found
   if (input && dropZone && checkBtn) {
     readyChecked = true;
     console.log("[CZO Verifier] Widget loaded in DOM.");
@@ -232,27 +267,30 @@ function pollForWidgetReady() {
   }
 }
 
-// Helper to wait for a condition to be true
 async function waitFor(conditionFn, timeout = 4000, interval = 100) {
   const startTime = Date.now();
   while (Date.now() - startTime < timeout) {
-    if (conditionFn()) {
-      return true;
-    }
+    if (conditionFn()) return true;
     await new Promise(resolve => setTimeout(resolve, interval));
   }
   throw new Error("Timeout waiting for condition");
 }
 
-// handleInjectAndVerify matching specifications
+function resetResultPollingState() {
+  resultPollingCount = 0;
+  signInfoFoundTicks = 0;
+}
+
 async function handleInjectAndVerify(payload) {
   contentRequestId = payload.requestId || contentRequestId;
+  resetResultPollingState();
+
   logToBackground("Commencing verification sequence.");
   console.log("[CZO Verifier] Starting verification sequence for payload.");
 
-  const input = document.querySelector("#chooseFilesInput") || document.querySelector("input[type=file]");
-  const dropZone = document.querySelector("#filesDropZone") || document.querySelector(".drop-zone") || document.querySelector(".dropzone");
-  const checkBtn = document.querySelector("#checkButton") || document.querySelector("button.verify-btn") || document.querySelector("button#checkButton");
+  const input = getInputElement();
+  const dropZone = getDropZone();
+  const checkBtn = getVerifyButton();
 
   if (!input || !checkBtn) {
     logToBackground("CZO Input or Verify elements disappeared from DOM.");
@@ -260,7 +298,10 @@ async function handleInjectAndVerify(payload) {
     return;
   }
 
-  const preparedFiles = (payload.files || []).map(makeFile);
+  logToBackground("Waiting 7 seconds before file injection...");
+  await new Promise(resolve => setTimeout(resolve, 7000));
+
+  const preparedFiles = buildFileObjects(payload.files || []);
   const injected = injectFiles(preparedFiles);
 
   if (!injected) {
@@ -268,18 +309,17 @@ async function handleInjectAndVerify(payload) {
     return;
   }
 
-  // Acknowledge files addition on CZO widget before triggering verification
   logToBackground("Awaiting DOM acknowledgement of uploaded files...");
 
   const isFileStateReady = () => {
-    // 1. Check if standard input has files (for standard click injection)
     if (input && input.files && input.files.length > 0) return true;
 
-    // 2. Check if dropzone has standard dropzone preview elements, dz-started class, or displays the files' names
     if (dropZone) {
       if (dropZone.classList.contains("dz-started")) return true;
-      if (dropZone.querySelectorAll(".dz-preview, .file-preview, .uploaded-file, .file-item").length > 0) return true;
-      
+      if (dropZone.querySelectorAll(".dz-preview, .file-preview, .uploaded-file, .file-item").length > 0) {
+        return true;
+      }
+
       const dropZoneText = dropZone.innerText || "";
       for (const f of preparedFiles) {
         if (dropZoneText.includes(f.name)) {
@@ -288,7 +328,6 @@ async function handleInjectAndVerify(payload) {
       }
     }
 
-    // 3. Robust page-wide text check: ensure the file names are visible anywhere in the document
     const bodyText = document.body.innerText || "";
     let foundAll = true;
     for (const f of preparedFiles) {
@@ -303,7 +342,6 @@ async function handleInjectAndVerify(payload) {
   };
 
   try {
-    // Wait up to 10 seconds for file state to be ready
     try {
       await waitFor(isFileStateReady, 10000, 200);
       logToBackground("File state is ready on CZO widget.");
@@ -313,14 +351,12 @@ async function handleInjectAndVerify(payload) {
       return;
     }
 
-    // Additional safety delay to let Vue/JS bindings update completely
     await new Promise(resolve => setTimeout(resolve, 1000));
 
     logToBackground("Triggering programmatic click on Verify button...");
     checkBtn.click();
     logToBackground("Verify ('Перевірити') button clicked.");
-    
-    // Start polling for the output results
+
     pollForVerificationResults();
   } catch (clickErr) {
     logToBackground(`Failed to trigger Verify click: ${clickErr.message}`);
@@ -328,16 +364,317 @@ async function handleInjectAndVerify(payload) {
   }
 }
 
-// Receive file injection command from background script supporting both formats
+function isVisibleElement(el) {
+  if (!el) return false;
+  const style = window.getComputedStyle(el);
+  if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+    return false;
+  }
+  const rect = el.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+
+function getElementText(el) {
+  return ((el?.innerText || el?.textContent || "") + "").trim();
+}
+
+function getElementDebugInfo(el, index = null) {
+  const text = getElementText(el);
+  const href = el.getAttribute ? (el.getAttribute("href") || "") : "";
+  const download = el.getAttribute ? (el.getAttribute("download") || "") : "";
+  const id = el.id || "";
+  const cls = (el.className || "").toString();
+  const tag = el.tagName || "";
+  const visible = isVisibleElement(el);
+  const disabled = !!(el.disabled || el.getAttribute?.("aria-disabled") === "true");
+
+  return {
+    index,
+    tag,
+    id,
+    className: cls,
+    text,
+    href,
+    download,
+    visible,
+    disabled
+  };
+}
+
+function formatElementDebugInfo(info) {
+  return [
+    `#${info.index}`,
+    `tag=${info.tag || "-"}`,
+    `id=${info.id || "-"}`,
+    `class=${info.className || "-"}`,
+    `visible=${info.visible}`,
+    `disabled=${info.disabled}`,
+    `text="${(info.text || "").replace(/\s+/g, " ").slice(0, 200)}"`,
+    `href="${(info.href || "").slice(0, 200)}"`,
+    `download="${(info.download || "").slice(0, 200)}"`
+  ].join(" | ");
+}
+
+function findArchiveDownloadButton(downloadButtonId = null) {
+  if (downloadButtonId) {
+    const byId = document.getElementById(downloadButtonId);
+    if (byId) {
+      const label = byId.querySelector("label.i18n");
+      const labelText = getElementText(label || byId);
+      const info = getElementDebugInfo(byId, 0);
+
+      logToBackground(`[findArchiveDownloadButton] Explicit id candidate: ${formatElementDebugInfo(info)}`);
+      logToBackground(`[findArchiveDownloadButton] Explicit id candidate label text: "${labelText}"`);
+
+      if (
+        byId.id === "saveAllButton" &&
+        label &&
+        labelText.trim() === "Завантажити все архівом"
+      ) {
+        logToBackground(`[findArchiveDownloadButton] Explicit id matched exact saveAllButton.`);
+        return byId;
+      }
+
+      logToBackground(`[findArchiveDownloadButton] Explicit id exists but is not the required saveAllButton.`);
+    } else {
+      logToBackground(`[findArchiveDownloadButton] Explicit button id "${downloadButtonId}" not found in DOM.`);
+    }
+  }
+
+  const exactButton = document.querySelector("div#saveAllButton.Block");
+  if (exactButton) {
+    const label = exactButton.querySelector("label.i18n");
+    const labelText = getElementText(label || exactButton);
+    const info = getElementDebugInfo(exactButton, 1);
+
+    logToBackground(`[findArchiveDownloadButton] Exact selector candidate: ${formatElementDebugInfo(info)}`);
+    logToBackground(`[findArchiveDownloadButton] Exact selector label text: "${labelText}"`);
+
+    if (label && labelText.trim() === "Завантажити все архівом") {
+      logToBackground(`[findArchiveDownloadButton] Selected exact saveAllButton with exact label match.`);
+      return exactButton;
+    }
+
+    logToBackground(`[findArchiveDownloadButton] saveAllButton found, but label does not match required text.`);
+  } else {
+    logToBackground(`[findArchiveDownloadButton] Exact selector div#saveAllButton.Block not found.`);
+  }
+
+  const allCandidates = Array.from(document.querySelectorAll("div.Block, button, a, [role='button']"));
+  logToBackground(`[findArchiveDownloadButton] Debug candidates count: ${allCandidates.length}`);
+
+  allCandidates.forEach((el, index) => {
+    const info = getElementDebugInfo(el, index + 1);
+    logToBackground(`[findArchiveDownloadButton] Debug candidate ${formatElementDebugInfo(info)}`);
+  });
+
+  logToBackground(`[findArchiveDownloadButton] Required archive button was not found.`);
+  return null;
+}
+
+async function handleClickArchiveDownload(message) {
+  contentRequestId = message.requestId || contentRequestId;
+
+  try {
+    const button = findArchiveDownloadButton(message.downloadButtonId || null);
+
+    if (!button) {
+      const err = 'Button "Завантажити все архівом" not found';
+      logToBackground(err);
+      await browser.runtime.sendMessage({
+        action: "archiveDownloadClickFailed",
+        requestId: contentRequestId,
+        error: err
+      });
+      return;
+    }
+
+    button.scrollIntoView({ block: "center", behavior: "instant" });
+
+    try {
+      button.focus({ preventScroll: true });
+    } catch (e) {}
+
+    logToBackground(`Clicking archive download control: "${getElementText(button) || button.id || button.tagName}"`);
+    button.click();
+
+    await browser.runtime.sendMessage({
+      action: "archiveDownloadClickDone",
+      requestId: contentRequestId
+    });
+  } catch (err) {
+    logToBackground(`Archive click error: ${err.message}`);
+    await browser.runtime.sendMessage({
+      action: "archiveDownloadClickFailed",
+      requestId: contentRequestId,
+      error: err.message
+    }).catch(() => {});
+  }
+}
+
+function collectErrorText() {
+  const errorElements = document.querySelectorAll(
+    ".error, .alert-danger, .alert-error, .text-danger, .invalid-feedback, .error-message, .error-text"
+  );
+
+  let errorText = "";
+  if (errorElements && errorElements.length > 0) {
+    for (const el of errorElements) {
+      const text = getElementText(el);
+      if (text && text.length > 3) {
+        errorText += text + "\n";
+      }
+    }
+  }
+  return errorText.trim();
+}
+
+function containsStrongErrorSignal(textLower, errorText) {
+  if (errorText) return true;
+
+  const errorPhrases = [
+    "невірний",
+    "помилка",
+    "не підтримується",
+    "помилка зчитування",
+    "не містить",
+    "не знайдено",
+    "відсутні",
+    "відсутній",
+    "немає",
+    "invalid",
+    "error"
+  ];
+
+  return errorPhrases.some(kw => textLower.includes(kw));
+}
+
+function getResultBlock() {
+  return (
+    document.querySelector("#signInfo") ||
+    document.querySelector(".sign-info") ||
+    document.querySelector(".results-block")
+  );
+}
+
+function pollForVerificationResults() {
+  resultPollingCount++;
+  logToBackground(`Polling for CZO results (tick ${resultPollingCount}/${maxResultPollingCount})...`);
+
+  const reportBtn =
+    document.querySelector("#saveReportFileButton") ||
+    document.querySelector("a[id*='Report']") ||
+    document.querySelector("button[id*='Report']");
+
+  const signInfoBlock = getResultBlock();
+  const errorText = collectErrorText();
+  const widgetText = document.body.innerText || "";
+  const lowercaseText = widgetText.toLowerCase();
+
+  if (containsStrongErrorSignal(lowercaseText, errorText) && !signInfoBlock && !reportBtn) {
+    logToBackground("Error indicator detected in DOM text.");
+    const fullErrorMsg = errorText || "CZO reported an error during validation.";
+    reportOutcome("error", "", fullErrorMsg);
+    return;
+  }
+
+  if (signInfoBlock || reportBtn) {
+    const resultText = signInfoBlock
+      ? getElementText(signInfoBlock)
+      : "Qualified Electronic Signature successfully verified by CZO.";
+
+    const archiveButton = findArchiveDownloadButton();
+
+    if (!archiveButton && signInfoBlock && signInfoFoundTicks < 5 && resultPollingCount < maxResultPollingCount) {
+      signInfoFoundTicks++;
+      logToBackground(`Verification block found. Waiting for archive download button to appear (tick ${signInfoFoundTicks}/5)...`);
+      setTimeout(pollForVerificationResults, 1000);
+      return;
+    }
+
+    let fallbackBlobUrl = null;
+    let fallbackFilename = "verification-receipt.zip";
+
+    if (archiveButton) {
+      const href = archiveButton.getAttribute("href");
+      const downloadAttr = archiveButton.getAttribute("download");
+
+      if (href) {
+        try {
+          fallbackBlobUrl = new URL(href, window.location.href).href;
+        } catch (e) {}
+      }
+
+      if (downloadAttr) {
+        fallbackFilename = downloadAttr;
+      } else if (href) {
+        const lastPart = href.split("/").pop();
+        if (lastPart) fallbackFilename = lastPart;
+      }
+    }
+
+    logToBackground("Verification result found in DOM.");
+
+    reportOutcome(
+      "ok",
+      resultText,
+      "",
+      fallbackBlobUrl,
+      fallbackFilename,
+      true,
+      archiveButton ? (archiveButton.id || null) : null
+    );
+    return;
+  }
+
+  if (resultPollingCount >= maxResultPollingCount) {
+    logToBackground("Reached maximum results polling duration. Checking if partial results exist.");
+    if (widgetText.includes("Підпис") || widgetText.includes("Протокол")) {
+      reportOutcome("ok", "Verification completed with partial results.", "", null, "", false, null);
+    } else {
+      reportOutcome("unknown", "", "CZO portal is taking too long to respond. Automated timeout.", null, "", false, null);
+    }
+    return;
+  }
+
+  setTimeout(pollForVerificationResults, 1000);
+}
+
+function reportOutcome(
+  status,
+  resultText = "",
+  errorText = "",
+  receiptBlobUrl = null,
+  receiptFilename = "",
+  autoDownloadArchive = false,
+  downloadButtonId = null
+) {
+  logToBackground(`Final outcome classified: Status = ${status}`);
+  browser.runtime.sendMessage({
+    action: "reportResult",
+    requestId: contentRequestId,
+    status,
+    resultText,
+    errorText,
+    receiptBlobUrl,
+    receiptFilename,
+    autoDownloadArchive,
+    downloadButtonId
+  }).catch(() => {});
+}
+
 browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "czo-inject-and-verify") {
     handleInjectAndVerify(message.payload);
+    sendResponse?.({ success: true });
+    return true;
   }
-  else if (message.action === "injectFiles") {
-    // Idempotency check: Ensure the same requestId is never run twice
+
+  if (message.action === "injectFiles") {
     if (contentRequestId === message.requestId && injectionTriggered) {
       console.log("[CZO Verifier] Idempotency Guard triggered. Duplicated injectFiles request ignored.");
-      return;
+      sendResponse?.({ success: true, ignored: true });
+      return true;
     }
 
     contentRequestId = message.requestId;
@@ -348,140 +685,20 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
       requestId: message.requestId,
       files: message.files
     });
+
+    sendResponse?.({ success: true });
+    return true;
   }
+
+  if (message.action === "clickArchiveDownload") {
+    handleClickArchiveDownload(message);
+    sendResponse?.({ success: true });
+    return true;
+  }
+
+  return false;
 });
 
-// Periodic polling loop to wait for verification completion
-let resultPollingCount = 0;
-const maxResultPollingCount = 60; // 60 seconds max
-let signInfoFoundTicks = 0;
-
-function pollForVerificationResults() {
-  resultPollingCount++;
-  logToBackground(`Polling for CZO results (tick ${resultPollingCount}/${maxResultPollingCount})...`);
-
-  // Let's identify DOM changes or presence of results
-  const reportBtn = document.querySelector("#saveReportFileButton") || document.querySelector("a[id*='Report']") || document.querySelector("button[id*='Report']");
-  const signInfoBlock = document.querySelector("#signInfo") || document.querySelector(".sign-info") || document.querySelector(".results-block");
-  const errorElements = document.querySelectorAll(".error, .alert-danger, .alert-error, .text-danger, .invalid-feedback, .error-message, .error-text");
-
-  // Determine if there is any visible error text or block
-  let errorText = "";
-  if (errorElements && errorElements.length > 0) {
-    for (const el of errorElements) {
-      const text = el.innerText ? el.innerText.trim() : "";
-      if (text && text.length > 10) {
-        errorText += text + "\n";
-      }
-    }
-  }
-
-  // Also search for global widget errors (like "невірний підпис", "помилка", "не підтримується")
-  const widgetText = document.body.innerText || "";
-  const lowercaseText = widgetText.toLowerCase();
-  
-  const hasErrorKeyword = ["невірний", "помилка", "не підтримується", "помилка зчитування", "не містить", "не знайдено", "відсутні", "відсутній", "немає", "error", "invalid"].some(kw => lowercaseText.includes(kw));
-
-  // If we find an unambiguous error container or keyword but no reportBtn yet, we check if it is a failure
-  if (hasErrorKeyword && (errorText || lowercaseText.includes("помилка") || lowercaseText.includes("не знайдено") || lowercaseText.includes("не містить"))) {
-    logToBackground("Error indicator detected in DOM text.");
-    const fullErrorMsg = errorText || "CZO reported an error during validation.";
-    reportOutcome("error", "", fullErrorMsg);
-    return;
-  }
-
-  // If a report button or sign information block appears, we are successful
-  if (signInfoBlock || reportBtn) {
-    // Try to locate receipt download link
-    let receiptBlobUrl = null;
-    let receiptFilename = "verification-receipt.zip";
-
-    // Prioritize zip/receipt download anchors over PDF reports
-    let anchor = null;
-    const zipAnchors = Array.from(document.querySelectorAll("a")).filter(a => {
-      return (a.download && a.download.toLowerCase().endsWith(".zip")) || 
-             (a.href && a.href.toLowerCase().includes(".zip")) ||
-             (a.id && (a.id.toLowerCase().includes("zip") || a.id.toLowerCase().includes("receipt")));
-    });
-
-    if (zipAnchors.length > 0) {
-      anchor = zipAnchors[0];
-    } else {
-      anchor = document.querySelector("#saveReceiptFileButton a") || 
-               document.querySelector("#saveReceiptFileButton") || 
-               document.querySelector("a[id*='Receipt']") || 
-               document.querySelector("button[id*='Receipt']") ||
-               document.querySelector("#saveReportFileButton a") || 
-               document.querySelector("#saveReportFileButton") || 
-               document.querySelector("a[id*='Report']");
-    }
-    
-    // If we have a valid href, or we have already waited 5 seconds after signInfoBlock appeared, we proceed
-    if (anchor && anchor.href) {
-      receiptBlobUrl = new URL(anchor.href, window.location.href).href;
-      if (anchor.download) {
-        receiptFilename = anchor.download;
-      }
-    } else if (signInfoBlock && signInfoFoundTicks < 5 && resultPollingCount < maxResultPollingCount) {
-      signInfoFoundTicks++;
-      logToBackground(`Verification block found. Waiting for download button/href to populate (tick ${signInfoFoundTicks}/5)...`);
-      setTimeout(pollForVerificationResults, 1000);
-      return;
-    } else if (anchor) {
-      // If we waited 5 seconds but no href was set on the anchor, let's trigger programmatic click fallback
-      try {
-        anchor.click();
-        logToBackground("Programmatic click on receipt fallback button triggered.");
-      } catch (clickErr) {
-        logToBackground(`Fallback click failed: ${clickErr.message}`);
-      }
-    }
-
-    logToBackground("Verification result found in DOM.");
-    
-    // Extract detailed result text
-    let resultText = "";
-    if (signInfoBlock) {
-      resultText = signInfoBlock.innerText ? signInfoBlock.innerText.trim() : "";
-    } else {
-      resultText = "Qualified Electronic Signature successfully verified by CZO.";
-    }
-
-    reportOutcome("ok", resultText, "", receiptBlobUrl, receiptFilename);
-    return;
-  }
-
-  // Max polling limit check
-  if (resultPollingCount >= maxResultPollingCount) {
-    logToBackground("Reached maximum results polling duration. Checking if partial results exist.");
-    // Evaluate if we can extract any message
-    if (widgetText.includes("Підпис") || widgetText.includes("Протокол")) {
-      reportOutcome("ok", "Verification completed with partial results.", "");
-    } else {
-      reportOutcome("unknown", "", "CZO portal is taking too long to respond. Automated timeout.");
-    }
-    return;
-  }
-
-  // Schedule next poll
-  setTimeout(pollForVerificationResults, 1000);
-}
-
-// Final result dispatcher to background script
-function reportOutcome(status, resultText = "", errorText = "", receiptBlobUrl = null, receiptFilename = "") {
-  logToBackground(`Final outcome classified: Status = ${status}`);
-  browser.runtime.sendMessage({
-    action: "reportResult",
-    requestId: contentRequestId,
-    status: status,
-    resultText: resultText,
-    errorText: errorText,
-    receiptBlobUrl: receiptBlobUrl,
-    receiptFilename: receiptFilename
-  }).catch(() => {});
-}
-
-// Initialize content script
 if (window.location.host.includes("czo.gov.ua") || window.location.host.includes("id.gov.ua")) {
   console.log("[CZO Verifier] content script loaded on page: " + window.location.href);
   pollForWidgetReady();
